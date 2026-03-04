@@ -89,6 +89,58 @@ with col2:
             st.warning("🔥 High Confidence Signal: Consider entering SHORT (Paper Trade)")
             
     st.divider()
+
+   # --- 4. The Paper Trading Ledger ---
+st.divider()
+st.subheader("📊 Paper Trading Ledger")
+
+# Initialize the ledger in Streamlit's memory if it doesn't exist yet
+if 'bankroll' not in st.session_state:
+    st.session_state.bankroll = 1000.00 # Start with $1000 simulated USDC
+if 'trade_history' not in st.session_state:
+    st.session_state.trade_history = []
+
+# Display current bankroll
+st.metric(label="Simulated Bankroll (USDC)", value=f"${st.session_state.bankroll:,.2f}")
+
+# Polymarket Simulation Inputs
+st.markdown("**Simulate a Polymarket Trade**")
+poly_share_price = st.number_input("Current 'Yes' Share Price (e.g., 0.65)", min_value=0.01, max_value=0.99, value=0.50)
+trade_amount = st.number_input("Amount to Wager ($)", min_value=1.0, max_value=st.session_state.bankroll, value=10.0)
+
+# The Logic: AI Confidence vs Polymarket Odds
+ai_prob_decimal = confidence / 100
+expected_value = (ai_prob_decimal * (1 / poly_share_price)) - 1
+
+st.write(f"**AI Expected Value (EV):** {expected_value:.2f}")
+
+if expected_value > 0.10: # If EV is positive by a 10% margin
+    st.success("🟢 Positive EV: The algorithm suggests BUYING.")
+elif expected_value < -0.10:
+    st.error("🔴 Negative EV: The algorithm suggests AVOIDING or betting NO.")
+else:
+    st.warning("🟡 Neutral EV: No clear edge.")
+
+# Manual resolution for the simulation
+colA, colB = st.columns(2)
+with colA:
+    if st.button("Resolve Trade: WON ✅"):
+        profit = (trade_amount / poly_share_price) - trade_amount
+        st.session_state.bankroll += profit
+        st.session_state.trade_history.append({"Prediction": prediction, "Result": "Win", "Profit": profit})
+        st.rerun()
+with colB:
+    if st.button("Resolve Trade: LOST ❌"):
+        st.session_state.bankroll -= trade_amount
+        st.session_state.trade_history.append({"Prediction": prediction, "Result": "Loss", "Profit": -trade_amount})
+        st.rerun()
+
+# Show Trade History
+if st.session_state.trade_history:
+    st.write("**Recent Trades:**")
+    history_df = pd.DataFrame(st.session_state.trade_history)
+    st.dataframe(history_df, use_container_width=True)
+
     st.write("Current Market Stats:")
     st.write(f"**Current Price:** ${raw_data['Close'].iloc[-1]:,.2f}")
     
