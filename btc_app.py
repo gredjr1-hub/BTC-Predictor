@@ -32,10 +32,9 @@ except Exception as e:
     st.error(f"Could not load the model. Error: {e}")
     st.stop()
 
-# --- 3. Data Fetchers ---
+# --- 3. Data Fetchers (UPDATED TO KRAKEN) ---
 def get_live_prediction_data():
-    """Fetches 1m data for the AI to calculate strict technical features."""
-    exchange = ccxt.binanceus({'enableRateLimit': True})
+    exchange = ccxt.kraken({'enableRateLimit': True})
     ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1m', limit=100)
     
     df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
@@ -56,8 +55,7 @@ def get_live_prediction_data():
     return df
 
 def get_24h_chart_data():
-    """Fetches 5m data specifically to render a clean 24-hour visual chart."""
-    exchange = ccxt.binanceus({'enableRateLimit': True})
+    exchange = ccxt.kraken({'enableRateLimit': True})
     ohlcv = exchange.fetch_ohlcv('BTC/USDT', '5m', limit=288)
     df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
@@ -65,9 +63,8 @@ def get_24h_chart_data():
     return df
 
 def get_live_ticker_price():
-    """Fetches the absolute latest price for the open bet tracker."""
     try:
-        exchange = ccxt.binanceus({'enableRateLimit': True})
+        exchange = ccxt.kraken({'enableRateLimit': True})
         ticker = exchange.fetch_ticker('BTC/USDT')
         return ticker['last']
     except:
@@ -101,7 +98,6 @@ def load_history_from_sheets():
         return pd.DataFrame(), None
 
 def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
-    """Checks the sheet for pending trades and grades them if 5 mins have passed."""
     if history_df.empty or sheet is None: return history_df
     
     pending_mask = history_df['Outcome'] == 'Pending'
@@ -120,11 +116,9 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                 
                 outcome = 'Win' if (prediction == 'UP' and actual_close > entry_price) or (prediction == 'DOWN' and actual_close < entry_price) else 'Loss'
                 
-                # Update DataFrame for immediate UI feedback
                 history_df.at[idx, 'Close_Price'] = round(actual_close, 2)
                 history_df.at[idx, 'Outcome'] = outcome
                 
-                # Update Google Sheet (idx + 2 accounts for 0-index and header row)
                 sheet.update_cell(idx + 2, 6, round(actual_close, 2))
                 sheet.update_cell(idx + 2, 7, outcome)
                 
@@ -140,18 +134,15 @@ with tab1:
             live_data = get_live_prediction_data()
             history_df, sheet = load_history_from_sheets()
             
-            # Grade past trades before making a new one
             history_df = resolve_pending_trades_in_sheets(live_data, history_df, sheet)
             
             current_state = live_data.iloc[-1:]
             current_price = float(current_state['Close'].values[0])
             current_time = current_state.index[0]
             
-            # Prevent mashing the button on the same minute
             if not history_df.empty and history_df['Prediction_Time'].iloc[-1] == current_time:
                 st.warning("Prediction already generated for this minute. Wait for the next candle.")
             else:
-                # Predict
                 prediction_val = model.predict(current_state)[0]
                 probabilities = model.predict_proba(current_state)[0]
                 
@@ -178,7 +169,6 @@ with tab1:
                 
                 st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
                 
-                # Push to Google Sheets
                 if sheet:
                     new_row = [
                         str(current_time),
@@ -261,7 +251,7 @@ with tab2:
 
         st.divider()
 
-        # --- NEW: Live Market & Advanced Stats ---
+        # --- Live Market & Advanced Stats ---
         st.markdown("#### ⚡ Live Market & Advanced Stats")
         
         live_price = get_live_ticker_price()
@@ -272,7 +262,6 @@ with tab2:
             if live_price:
                 st.metric("Live BTC/USDT Price", f"${live_price:,.2f}")
                 
-                # Active Open Bets Tracker
                 pending_trades = history[history['Outcome'] == 'Pending']
                 if not pending_trades.empty:
                     st.markdown("**Active Open Bets:**")
@@ -280,7 +269,6 @@ with tab2:
                         entry = float(row['Entry_Price'])
                         direction = row['Prediction']
                         
-                        # Calculate current paper PnL
                         diff = live_price - entry if direction == 'UP' else entry - live_price
                         status_color = "green" if diff > 0 else "red"
                         status_icon = "🟢 Profit" if diff > 0 else "🔴 Drawdown"
@@ -297,7 +285,6 @@ with tab2:
             overall_wr = (wins / total_completed * 100) if total_completed > 0 else 0
             st.write(f"- Overall Win Rate: **{overall_wr:.1f}%**")
             
-            # 90th Percentile Confidence Win Rate
             if total_completed > 0:
                 p90_threshold = completed_trades['Confidence'].quantile(0.90)
                 p90_trades = completed_trades[completed_trades['Confidence'] >= p90_threshold]
@@ -310,7 +297,6 @@ with tab2:
         with col_stats2:
             st.markdown("**Direction & Conviction:**")
             if total_completed > 0:
-                # Win rate by direction
                 up_trades = completed_trades[completed_trades['Prediction'] == 'UP']
                 up_wr = (len(up_trades[up_trades['Outcome']=='Win']) / len(up_trades) * 100) if len(up_trades) > 0 else 0
                 
@@ -320,11 +306,9 @@ with tab2:
                 st.write(f"- Long (UP) Win Rate: **{up_wr:.1f}%**")
                 st.write(f"- Short (DOWN) Win Rate: **{down_wr:.1f}%**")
                 
-                # Average Confidence Check
                 avg_conf_win = completed_trades[completed_trades['Outcome'] == 'Win']['Confidence'].mean()
                 avg_conf_loss = completed_trades[completed_trades['Outcome'] == 'Loss']['Confidence'].mean()
                 
-                # Handle NaNs if no wins or losses exist yet
                 avg_conf_win = avg_conf_win if pd.notna(avg_conf_win) else 0.0
                 avg_conf_loss = avg_conf_loss if pd.notna(avg_conf_loss) else 0.0
                 
