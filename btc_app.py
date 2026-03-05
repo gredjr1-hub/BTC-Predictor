@@ -67,7 +67,11 @@ def get_24h_chart_data():
 # --- 4. Google Sheets Connection & Grader ---
 def get_gspread_client():
     creds_dict = dict(st.secrets["GCP_CREDENTIALS"])
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    # THE FIX: Drive scope added for searching by file name
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
 

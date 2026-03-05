@@ -15,7 +15,12 @@ def get_sheet():
     creds_json = os.environ.get('GCP_CREDENTIALS')
     creds_dict = json.loads(creds_json)
     
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    # THE FIX: Add the Google Drive scope so it can search for the file by name
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
