@@ -47,12 +47,16 @@ def get_live_prediction_data():
     
     return df
 
-# --- 4. Tracker System (Lazy Evaluator) ---
+# --- 4. Tracker System (Bulletproof Lazy Evaluator) ---
 HISTORY_FILE = "trade_history.csv"
 
 def load_history():
     if os.path.exists(HISTORY_FILE):
-        return pd.read_csv(HISTORY_FILE, parse_dates=['Prediction_Time', 'Target_Time'])
+        df = pd.read_csv(HISTORY_FILE)
+        # FORCE strict Pandas Datetime parsing to prevent string comparison errors
+        df['Prediction_Time'] = pd.to_datetime(df['Prediction_Time'])
+        df['Target_Time'] = pd.to_datetime(df['Target_Time'])
+        return df
     else:
         return pd.DataFrame(columns=['Prediction_Time', 'Entry_Price', 'Prediction', 'Confidence', 'Target_Time', 'Close_Price', 'Outcome'])
 
@@ -64,29 +68,36 @@ def resolve_pending_trades(live_data):
     if history.empty: return history
     
     pending_mask = history['Outcome'] == 'Pending'
+    latest_live_time = live_data.index[-1] 
     
     for idx, row in history[pending_mask].iterrows():
         target_time = row['Target_Time']
         
-        # Check if the target time has passed AND is in our recently downloaded live data
-        if target_time <= datetime.utcnow() and target_time in live_data.index:
-            actual_close = live_data.loc[target_time, 'Close']
-            entry_price = row['Entry_Price']
-            prediction = row['Prediction']
+        # 1. Has the target time actually arrived on the exchange?
+        if target_time <= latest_live_time:
             
-            history.at[idx, 'Close_Price'] = actual_close
+            # 2. Get the closest candle AT or immediately AFTER the target time
+            # (Safeguards against zero-volume skipped minutes)
+            valid_candles = live_data[live_data.index >= target_time]
             
-            # Grade the prediction
-            if prediction == 'UP' and actual_close > entry_price:
-                history.at[idx, 'Outcome'] = 'Win'
-            elif prediction == 'DOWN' and actual_close < entry_price:
-                history.at[idx, 'Outcome'] = 'Win'
-            else:
-                history.at[idx, 'Outcome'] = 'Loss'
+            if not valid_candles.empty:
+                actual_close = valid_candles['Close'].iloc[0]
+                entry_price = row['Entry_Price']
+                prediction = row['Prediction']
                 
+                # Update the history dataframe
+                history.at[idx, 'Close_Price'] = round(actual_close, 2)
+                
+                # Grade the trade
+                if prediction == 'UP' and actual_close > entry_price:
+                    history.at[idx, 'Outcome'] = 'Win'
+                elif prediction == 'DOWN' and actual_close < entry_price:
+                    history.at[idx, 'Outcome'] = 'Win'
+                else:
+                    history.at[idx, 'Outcome'] = 'Loss'
+                    
     save_history(history)
     return history
-
 
 # --- 5. UI Layout (Tabs) ---
 tab1, tab2 = st.tabs(["🔮 Live Predictor", "📊 Analytics & History"])
@@ -97,7 +108,7 @@ with tab1:
         with st.spinner("Fetching live data & analyzing..."):
             live_data = get_live_prediction_data()
             
-            # Auto-grade any pending trades while we have the fresh data!
+            # Auto-grade any pending trades while we have the fresh data
             resolve_pending_trades(live_data)
             
             current_state = live_data.iloc[-1:]
@@ -151,12 +162,9 @@ with tab1:
 with tab2:
     st.markdown("### Forward Testing Analytics")
     
-    # Reload and resolve any pending data just in case
-    try:
-        live_data = get_live_prediction_data()
-        history = resolve_pending_trades(live_data)
-    except:
-        history = load_history()
+    # Fetch live data and auto-grade BEFORE showing the table
+    live_data = get_live_prediction_data()
+    history = resolve_pending_trades(live_data)
     
     if not history.empty:
         # Metrics
@@ -174,10 +182,10 @@ with tab2:
         # Display the Tracker
         st.markdown("#### Permanent Tracker Log")
         
-        # Style the dataframe so Wins are green and Losses are red
+        # Style the dataframe so Wins are green and Losses are red (using rgba for theme compatibility)
         def highlight_outcome(val):
-            if val == 'Win': return 'background-color: #004d00'
-            elif val == 'Loss': return 'background-color: #4d0000'
+            if val == 'Win': return 'background-color: rgba(0, 255, 0, 0.15)'
+            elif val == 'Loss': return 'background-color: rgba(255, 0, 0, 0.15)'
             return ''
             
         st.dataframe(history.style.map(highlight_outcome, subset=['Outcome']), use_container_width=True)
