@@ -8,7 +8,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+
+# ------------------------------------------------------------
+# Timezone (Eastern Time / America-New_York)
+# ------------------------------------------------------------
+ET_TZ = ZoneInfo("America/New_York")
 
 # --- 1. Page Setup & Live Sync ---
 st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
@@ -35,6 +41,7 @@ def get_exchange():
 def load_model():
     return joblib.load("btc_5m_rf_model.joblib")
 
+
 try:
     model = load_model()
 except Exception as e:
@@ -48,7 +55,8 @@ def get_live_prediction_data():
     ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1m", limit=100)
 
     df = pd.DataFrame(ohlcv, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms")
+    # CCXT timestamps are in UTC ms; convert to tz-aware ET for consistent display/logic
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True).dt.tz_convert(ET_TZ)
     df.set_index("Timestamp", inplace=True)
 
     df["RSI_14"] = ta.momentum.rsi(df["Close"], window=14)
@@ -70,7 +78,7 @@ def get_24h_chart_data():
     ohlcv = exchange.fetch_ohlcv("BTC/USDT", "5m", limit=288)
 
     df = pd.DataFrame(ohlcv, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms")
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True).dt.tz_convert(ET_TZ)
     df.set_index("Timestamp", inplace=True)
     return df
 
@@ -96,6 +104,21 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+def _parse_time_to_et(series: pd.Series) -> pd.Series:
+    """
+    Parse times from Sheets into tz-aware ET timestamps.
+    - If the value has an offset / tz info: convert to ET
+    - If tz-naive (older logs): assume it was UTC (from the old app) and convert to ET
+    """
+    s = pd.to_datetime(series, errors="coerce")
+    # tz-naive -> assume UTC then convert to ET
+    if getattr(s.dt, "tz", None) is None:
+        s = s.dt.tz_localize("UTC").dt.tz_convert(ET_TZ)
+    else:
+        s = s.dt.tz_convert(ET_TZ)
+    return s
+
+
 def load_history_from_sheets():
     try:
         client = get_gspread_client()
@@ -106,8 +129,12 @@ def load_history_from_sheets():
             return pd.DataFrame(), sheet
 
         df = pd.DataFrame(records)
-        df["Prediction_Time"] = pd.to_datetime(df["Prediction_Time"])
-        df["Target_Time"] = pd.to_datetime(df["Target_Time"])
+
+        if "Prediction_Time" in df.columns:
+            df["Prediction_Time"] = _parse_time_to_et(df["Prediction_Time"])
+        if "Target_Time" in df.columns:
+            df["Target_Time"] = _parse_time_to_et(df["Target_Time"])
+
         return df, sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
@@ -118,17 +145,22 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
     if history_df.empty or sheet is None:
         return history_df
 
+    if "Outcome" not in history_df.columns or "Target_Time" not in history_df.columns:
+        return history_df
+
     pending_mask = history_df["Outcome"] == "Pending"
-    latest_live_time = live_data.index[-1]
+    latest_live_time = live_data.index[-1]  # tz-aware ET
 
     for idx, row in history_df[pending_mask].iterrows():
-        target_time = row["Target_Time"]
+        target_time = row.get("Target_Time", pd.NaT)
+        if pd.isna(target_time):
+            continue
 
         if target_time <= latest_live_time:
             valid_candles = live_data[live_data.index >= target_time]
 
             if not valid_candles.empty:
-                actual_close = valid_candles["Close"].iloc[0]
+                actual_close = float(valid_candles["Close"].iloc[0])
                 entry_price = float(row["Entry_Price"])
                 prediction = row["Prediction"]
 
@@ -142,6 +174,7 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                 history_df.at[idx, "Close_Price"] = round(actual_close, 2)
                 history_df.at[idx, "Outcome"] = outcome
 
+                # Sheet row index offset (+2) = header row + 0-index -> 1-index
                 sheet.update_cell(idx + 2, 6, round(actual_close, 2))
                 sheet.update_cell(idx + 2, 7, outcome)
 
@@ -154,10 +187,9 @@ _fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment"
 
 if _fragment is None:
     # Fallback: app will still run, but the live ticker won't auto-refresh without a full rerun.
-    def _fragment(*args, **kwargs):  # noqa: D401
+    def _fragment(*args, **kwargs):
         def _wrap(func):
             return func
-
         return _wrap
 
 
@@ -184,7 +216,7 @@ def live_market_and_advanced_stats_fragment(
     live_price = get_live_ticker_price()
     if live_price is not None:
         st.session_state.last_live_price = float(live_price)
-        st.session_state.last_live_price_ts = datetime.utcnow()
+        st.session_state.last_live_price_ts = datetime.now(ET_TZ).replace(microsecond=0)
     else:
         live_price = st.session_state.last_live_price
 
@@ -196,7 +228,7 @@ def live_market_and_advanced_stats_fragment(
 
             ts = st.session_state.get("last_live_price_ts")
             if ts:
-                st.caption(f"Last tick: {ts.strftime('%H:%M:%S')} UTC • Source: Kraken (CCXT)")
+                st.caption(f"Last tick: {ts.strftime('%Y-%m-%d %H:%M:%S %Z')} • Source: Kraken (CCXT)")
             else:
                 st.caption("Source: Kraken (CCXT)")
 
@@ -258,11 +290,64 @@ with tab1:
 
             current_state = live_data.iloc[-1:]
             current_price = float(current_state["Close"].values[0])
-            current_time = current_state.index[0]
+            candle_time = current_state.index[0]  # tz-aware ET, minute candle timestamp
 
-            if not history_df.empty and history_df["Prediction_Time"].iloc[-1] == current_time:
-                st.warning("Prediction already generated for this minute. Wait for the next candle.")
+            prediction_time = datetime.now(ET_TZ).replace(microsecond=0)
+            target_time = prediction_time + timedelta(minutes=5)
+
+            # Prevent duplicate predictions for the same latest 1-minute candle (even though we log seconds now)
+            if not history_df.empty and "Prediction_Time" in history_df.columns:
+                last_pred_time = history_df["Prediction_Time"].iloc[-1]
+                try:
+                    last_pred_floor = pd.Timestamp(last_pred_time).floor("min")
+                except Exception:
+                    last_pred_floor = None
+
+                if last_pred_floor is not None and last_pred_floor == pd.Timestamp(candle_time).floor("min"):
+                    st.warning("Prediction already generated for the latest 1-minute candle. Wait for the next candle.")
+                else:
+                    prediction_val = model.predict(current_state)[0]
+                    probabilities = model.predict_proba(current_state)[0]
+
+                    direction = "UP" if prediction_val == 1 else "DOWN"
+                    confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
+                    confidence_pct = confidence * 100
+
+                    if confidence_pct < 55:
+                        signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
+                        color = "orange"
+                    elif confidence_pct < 60:
+                        signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
+                        color = "blue"
+                    else:
+                        signal_strength = "🔥 STRONG SIGNAL (High Probability)"
+                        color = "green"
+
+                    st.markdown(f"### Prediction Time: {prediction_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                    st.markdown(f"### Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Current BTC Price", f"${current_price:,.2f}")
+                    col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
+                    col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
+
+                    st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
+
+                    if sheet:
+                        # Store ISO 8601 strings with timezone offset for unambiguous parsing & sorting
+                        new_row = [
+                            prediction_time.isoformat(),
+                            current_price,
+                            direction,
+                            round(confidence_pct, 2),
+                            target_time.isoformat(),
+                            "",
+                            "Pending",
+                        ]
+                        sheet.append_row(new_row)
+                        st.success("✅ Prediction successfully logged to Google Sheets!")
             else:
+                # No history yet — proceed normally
                 prediction_val = model.predict(current_state)[0]
                 probabilities = model.predict_proba(current_state)[0]
 
@@ -280,7 +365,8 @@ with tab1:
                     signal_strength = "🔥 STRONG SIGNAL (High Probability)"
                     color = "green"
 
-                st.markdown(f"### Target Time: {(current_time + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC")
+                st.markdown(f"### Prediction Time: {prediction_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                st.markdown(f"### Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Current BTC Price", f"${current_price:,.2f}")
@@ -291,11 +377,11 @@ with tab1:
 
                 if sheet:
                     new_row = [
-                        str(current_time),
+                        prediction_time.isoformat(),
                         current_price,
                         direction,
                         round(confidence_pct, 2),
-                        str(current_time + timedelta(minutes=5)),
+                        target_time.isoformat(),
                         "",
                         "Pending",
                     ]
@@ -313,7 +399,7 @@ with tab2:
 
         # --- Thermal Streaks ---
         def calculate_streak(history_df, hours):
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = datetime.now(ET_TZ) - timedelta(hours=hours)
             window = history_df[
                 (history_df["Prediction_Time"] >= cutoff) & (history_df["Outcome"].isin(["Win", "Loss"]))
             ]
@@ -440,7 +526,7 @@ with tab2:
         )
 
         # --- The Data Table ---
-        st.markdown("#### Cloud Tracker Log")
+        st.markdown("#### Cloud Tracker Log (Times shown in Eastern Time)")
 
         def highlight_outcome(val):
             if val == "Win":
