@@ -64,10 +64,18 @@ def get_24h_chart_data():
     df.set_index('Timestamp', inplace=True)
     return df
 
+def get_live_ticker_price():
+    """Fetches the absolute latest price for the open bet tracker."""
+    try:
+        exchange = ccxt.binanceus({'enableRateLimit': True})
+        ticker = exchange.fetch_ticker('BTC/USDT')
+        return ticker['last']
+    except:
+        return None
+
 # --- 4. Google Sheets Connection & Grader ---
 def get_gspread_client():
     creds_dict = dict(st.secrets["GCP_CREDENTIALS"])
-    # THE FIX: Drive scope added for searching by file name
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -190,6 +198,9 @@ with tab2:
     history, _ = load_history_from_sheets()
     
     if not history.empty:
+        completed_trades = history[history['Outcome'].isin(['Win', 'Loss'])]
+        total_completed = len(completed_trades)
+        
         # --- Thermal Streaks ---
         def calculate_streak(history_df, hours):
             cutoff = datetime.utcnow() - timedelta(hours=hours)
@@ -247,6 +258,79 @@ with tab2:
 
             fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=500)
             st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+        # --- NEW: Live Market & Advanced Stats ---
+        st.markdown("#### ⚡ Live Market & Advanced Stats")
+        
+        live_price = get_live_ticker_price()
+        
+        col_live, col_stats1, col_stats2 = st.columns([1.5, 1, 1])
+        
+        with col_live:
+            if live_price:
+                st.metric("Live BTC/USDT Price", f"${live_price:,.2f}")
+                
+                # Active Open Bets Tracker
+                pending_trades = history[history['Outcome'] == 'Pending']
+                if not pending_trades.empty:
+                    st.markdown("**Active Open Bets:**")
+                    for _, row in pending_trades.iterrows():
+                        entry = float(row['Entry_Price'])
+                        direction = row['Prediction']
+                        
+                        # Calculate current paper PnL
+                        diff = live_price - entry if direction == 'UP' else entry - live_price
+                        status_color = "green" if diff > 0 else "red"
+                        status_icon = "🟢 Profit" if diff > 0 else "🔴 Drawdown"
+                        
+                        st.markdown(f"- {direction} from **${entry:,.2f}** | :{status_color}[{status_icon} (${abs(diff):,.2f})]")
+                else:
+                    st.markdown("*No active bets currently open.*")
+            else:
+                st.warning("Could not fetch live price.")
+
+        with col_stats1:
+            st.markdown("**Core Win Rates:**")
+            wins = len(completed_trades[completed_trades['Outcome'] == 'Win'])
+            overall_wr = (wins / total_completed * 100) if total_completed > 0 else 0
+            st.write(f"- Overall Win Rate: **{overall_wr:.1f}%**")
+            
+            # 90th Percentile Confidence Win Rate
+            if total_completed > 0:
+                p90_threshold = completed_trades['Confidence'].quantile(0.90)
+                p90_trades = completed_trades[completed_trades['Confidence'] >= p90_threshold]
+                p90_wins = len(p90_trades[p90_trades['Outcome'] == 'Win'])
+                p90_wr = (p90_wins / len(p90_trades) * 100) if len(p90_trades) > 0 else 0
+                st.write(f"- Top 10% Conf Win Rate: **{p90_wr:.1f}%** *(>={p90_threshold:.1f}% Conf)*")
+            else:
+                st.write("- Top 10% Conf Win Rate: **N/A**")
+
+        with col_stats2:
+            st.markdown("**Direction & Conviction:**")
+            if total_completed > 0:
+                # Win rate by direction
+                up_trades = completed_trades[completed_trades['Prediction'] == 'UP']
+                up_wr = (len(up_trades[up_trades['Outcome']=='Win']) / len(up_trades) * 100) if len(up_trades) > 0 else 0
+                
+                down_trades = completed_trades[completed_trades['Prediction'] == 'DOWN']
+                down_wr = (len(down_trades[down_trades['Outcome']=='Win']) / len(down_trades) * 100) if len(down_trades) > 0 else 0
+                
+                st.write(f"- Long (UP) Win Rate: **{up_wr:.1f}%**")
+                st.write(f"- Short (DOWN) Win Rate: **{down_wr:.1f}%**")
+                
+                # Average Confidence Check
+                avg_conf_win = completed_trades[completed_trades['Outcome'] == 'Win']['Confidence'].mean()
+                avg_conf_loss = completed_trades[completed_trades['Outcome'] == 'Loss']['Confidence'].mean()
+                
+                # Handle NaNs if no wins or losses exist yet
+                avg_conf_win = avg_conf_win if pd.notna(avg_conf_win) else 0.0
+                avg_conf_loss = avg_conf_loss if pd.notna(avg_conf_loss) else 0.0
+                
+                st.caption(f"Avg Conf on Wins: {avg_conf_win:.1f}% | On Losses: {avg_conf_loss:.1f}%")
+
+        st.divider()
 
         # --- The Data Table ---
         st.markdown("#### Cloud Tracker Log")
