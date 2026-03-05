@@ -1,56 +1,42 @@
 import pandas as pd
-import xgboost as xgb
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
 import joblib 
 
-def train_xgboost(filepath):
-    print("Loading processed data...")
-    df = pd.read_parquet(filepath)
+def train_production_model(filepath):
+    print("Loading processed data (this takes a few seconds)...")
+    df = pd.read_csv(filepath)
+    df.set_index('Timestamp', inplace=True)
+
+    print("Cleaning up Infinities from division-by-zero volume spikes...")
+    # Replace Infinity with NaN, then drop those broken rows
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.dropna(inplace=True)
 
     # Separate our technical indicators (X) from our target (y)
     X = df.drop(columns=['Target'])
     y = df['Target']
 
-    print("Splitting data into training and testing sets...")
-    # CRITICAL TRADING RULE: Never shuffle time-series data!
-    # We must train on the past (first 80%) to predict the future (last 20%).
-    # If you shuffle, the model looks into the future to predict the past.
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    print(f"Training PRODUCTION model on ALL {len(X):,} rows...")
+    print("Note: Skipping the test split. The AI is consuming 100% of the data.")
 
-    print(f"Training on {len(X_train):,} rows, Testing on {len(X_test):,} rows.")
-
-    # Initialize the XGBoost Classifier
-    # We use conservative parameters to prevent it from memorizing market noise
-    model = xgb.XGBClassifier(
-        n_estimators=100,      # Number of trees
-        learning_rate=0.05,    # How aggressively it learns
-        max_depth=5,           # How complex each tree can get
+    # Initialize the Random Forest Classifier
+    model = RandomForestClassifier(
+        n_estimators=100,      
+        max_depth=5,           
         random_state=42,
-        eval_metric='logloss'
+        n_jobs=1 # Safely single-threaded for Mac
     )
 
-    print("Training the model (this will take a minute or two)...")
-    model.fit(X_train, y_train)
+    print("Training the model (this will take 1 to 3 minutes)...")
+    model.fit(X, y)
 
-    print("Evaluating the model on unseen future data...")
-    y_pred = model.predict(X_test)
-    
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"\n--- Model Results ---")
-    print(f"Baseline Accuracy: {accuracy * 100:.2f}%")
-    
-    # Precision is often more important than accuracy in trading. 
-    # If it says UP, how often is it actually UP?
-    print("\nDetailed Report:")
-    print(classification_report(y_test, y_pred))
-
-    # Save the model to disk
-    model_filename = "btc_5m_xgboost.joblib"
+    # Save the production model to disk
+    model_filename = "btc_5m_rf_model.joblib"
     joblib.dump(model, model_filename)
-    print(f"\nModel saved successfully as {model_filename}")
+    print(f"\n✅ Production model saved successfully as {model_filename}")
 
-    # Extract Feature Importance (The "Why")
+    # Extract Feature Importance to see what the final brain prioritizes
     feature_importance = pd.DataFrame({
         'Feature': X.columns,
         'Importance': model.feature_importances_
@@ -60,4 +46,5 @@ def train_xgboost(filepath):
     print(feature_importance.head(5))
 
 if __name__ == "__main__":
-    train_xgboost("BTCUSDT_1m_processed.parquet")
+    # Point to your processed CSV
+    train_production_model("BTCUSDT_1m_processed.csv")
