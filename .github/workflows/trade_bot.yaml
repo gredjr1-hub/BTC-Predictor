@@ -3,7 +3,7 @@ name: AI Trading Bot (Headless)
 on:
   schedule:
     # Attempt to run every 15 minutes
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Allows you to click a button to run it manually
 
 jobs:
