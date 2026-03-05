@@ -8,7 +8,52 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+
+# --- Timezone helpers (display in Eastern Time; keep internal logic & Sheets in UTC-naive) ---
+ET_TZ = ZoneInfo("America/New_York")
+
+
+def _utc_naive_to_et_ts(dt):
+    """Interpret a tz-naive datetime/timestamp as UTC and convert to US/Eastern (tz-aware)."""
+    if dt is None or (isinstance(dt, float) and np.isnan(dt)):
+        return None
+    try:
+        ts = pd.Timestamp(dt)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.tz_convert(ET_TZ)
+    except Exception:
+        return None
+
+
+def fmt_et(dt, fmt: str) -> str:
+    ts = _utc_naive_to_et_ts(dt)
+    if ts is None:
+        return ""
+    try:
+        return ts.strftime(fmt)
+    except Exception:
+        return ""
+
+
+def et_naive(dt):
+    """UTC-naive -> Eastern-naive (for Plotly display)."""
+    ts = _utc_naive_to_et_ts(dt)
+    if ts is None:
+        return None
+    try:
+        return ts.tz_localize(None).to_pydatetime()
+    except Exception:
+        try:
+            py = ts.to_pydatetime()
+            return py.replace(tzinfo=None)
+        except Exception:
+            return None
+
 
 # --- 1. Page Setup & Live Sync ---
 st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
@@ -34,6 +79,7 @@ def get_exchange():
 @st.cache_resource
 def load_model():
     return joblib.load("btc_5m_rf_model.joblib")
+
 
 try:
     model = load_model()
@@ -196,7 +242,7 @@ def live_market_and_advanced_stats_fragment(
 
             ts = st.session_state.get("last_live_price_ts")
             if ts:
-                st.caption(f"Last tick: {ts.strftime('%H:%M:%S')} UTC • Source: Kraken (CCXT)")
+                st.caption(f"Last tick: {fmt_et(ts, '%H:%M:%S %Z')} • Source: Kraken (CCXT)")
             else:
                 st.caption("Source: Kraken (CCXT)")
 
@@ -258,7 +304,7 @@ with tab1:
 
             current_state = live_data.iloc[-1:]
             current_price = float(current_state["Close"].values[0])
-            current_time = current_state.index[0]
+            current_time = current_state.index[0]  # UTC-naive candle timestamp
 
             if not history_df.empty and history_df["Prediction_Time"].iloc[-1] == current_time:
                 st.warning("Prediction already generated for this minute. Wait for the next candle.")
@@ -280,7 +326,8 @@ with tab1:
                     signal_strength = "🔥 STRONG SIGNAL (High Probability)"
                     color = "green"
 
-                st.markdown(f"### Target Time: {(current_time + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC")
+                target_time = current_time + timedelta(minutes=5)
+                st.markdown(f"### Target Time: {fmt_et(target_time, '%H:%M %Z')}")
 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Current BTC Price", f"${current_price:,.2f}")
@@ -290,12 +337,13 @@ with tab1:
                 st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
 
                 if sheet:
+                    # Keep logging in UTC-naive (same as before) so existing sheet data & grading remain consistent.
                     new_row = [
                         str(current_time),
                         current_price,
                         direction,
                         round(confidence_pct, 2),
-                        str(current_time + timedelta(minutes=5)),
+                        str(target_time),
                         "",
                         "Pending",
                     ]
@@ -313,7 +361,7 @@ with tab2:
 
         # --- Thermal Streaks ---
         def calculate_streak(history_df, hours):
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            cutoff = datetime.utcnow() - timedelta(hours=hours)  # UTC-naive cutoff (matches sheet + live_data)
             window = history_df[
                 (history_df["Prediction_Time"] >= cutoff) & (history_df["Outcome"].isin(["Win", "Loss"]))
             ]
@@ -344,23 +392,28 @@ with tab2:
         st.divider()
 
         # --- The 24h Visualizer ---
-        st.markdown("#### 24-Hour Trade Overlay")
+        st.markdown("#### 24-Hour Trade Overlay (Times shown in Eastern Time)")
         with st.spinner("Rendering 24-hour chart..."):
             chart_data = get_24h_chart_data()
+
+            # Convert chart x-axis to Eastern time for display (interpret index as UTC-naive).
+            chart_data_et = chart_data.copy()
+            chart_data_et.index = pd.to_datetime(chart_data_et.index).tz_localize("UTC").tz_convert(ET_TZ).tz_localize(None)
 
             fig = go.Figure(
                 data=[
                     go.Candlestick(
-                        x=chart_data.index,
-                        open=chart_data["Open"],
-                        high=chart_data["High"],
-                        low=chart_data["Low"],
-                        close=chart_data["Close"],
+                        x=chart_data_et.index,
+                        open=chart_data_et["Open"],
+                        high=chart_data_et["High"],
+                        low=chart_data_et["Low"],
+                        close=chart_data_et["Close"],
                         name="BTC/USDT",
                     )
                 ]
             )
 
+            # Filter in UTC (original data), then convert points to ET for plotting.
             recent_history = history[history["Prediction_Time"] >= chart_data.index[0]]
 
             for _, row in recent_history.iterrows():
@@ -368,9 +421,13 @@ with tab2:
                 color = "green" if row["Outcome"] == "Win" else "red" if row["Outcome"] == "Loss" else "yellow"
                 size = 14 if row["Outcome"] != "Pending" else 10
 
+                x_pt = et_naive(row["Prediction_Time"])
+                if x_pt is None:
+                    continue
+
                 fig.add_trace(
                     go.Scatter(
-                        x=[row["Prediction_Time"]],
+                        x=[x_pt],
                         y=[row["Entry_Price"]],
                         mode="markers",
                         marker=dict(symbol=symbol, size=size, color=color, line=dict(width=2, color="white")),
@@ -440,7 +497,7 @@ with tab2:
         )
 
         # --- The Data Table ---
-        st.markdown("#### Cloud Tracker Log")
+        st.markdown("#### Cloud Tracker Log (Times shown in Eastern Time)")
 
         def highlight_outcome(val):
             if val == "Win":
@@ -449,7 +506,17 @@ with tab2:
                 return "background-color: rgba(255, 0, 0, 0.15)"
             return ""
 
-        st.dataframe(history.iloc[::-1].style.map(highlight_outcome, subset=["Outcome"]), use_container_width=True)
+        # For display, render time columns as strings in ET (avoids tz-aware dtype issues in Streamlit tables).
+        history_display = history.copy()
+        if "Prediction_Time" in history_display.columns:
+            history_display["Prediction_Time"] = history_display["Prediction_Time"].apply(lambda x: fmt_et(x, "%Y-%m-%d %H:%M %Z"))
+        if "Target_Time" in history_display.columns:
+            history_display["Target_Time"] = history_display["Target_Time"].apply(lambda x: fmt_et(x, "%Y-%m-%d %H:%M %Z"))
+
+        st.dataframe(
+            history_display.iloc[::-1].style.map(highlight_outcome, subset=["Outcome"]),
+            use_container_width=True,
+        )
 
     else:
         st.info("No predictions found in the Google Sheet yet. Run a prediction to start tracking!")
