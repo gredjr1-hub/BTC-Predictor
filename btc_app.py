@@ -12,9 +12,18 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------------------------------------
-# Timezone (Eastern Time / America-New_York)
+# Timezone (Eastern Time / America/New_York)
+# NOTE: This is "Eastern Time" and will show EST/EDT automatically.
 # ------------------------------------------------------------
 ET_TZ = ZoneInfo("America/New_York")
+
+
+def dt_to_sheet_str(dt: datetime) -> str:
+    """Stable, parse-friendly timestamp string with offset, to-the-second."""
+    dt = dt.astimezone(ET_TZ).replace(microsecond=0)
+    # Example: 2026-03-05 05:38:50-0500
+    return dt.strftime("%Y-%m-%d %H:%M:%S%z")
+
 
 # --- 1. Page Setup & Live Sync ---
 st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
@@ -55,7 +64,7 @@ def get_live_prediction_data():
     ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1m", limit=100)
 
     df = pd.DataFrame(ohlcv, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
-    # CCXT timestamps are in UTC ms; convert to tz-aware ET for consistent display/logic
+    # CCXT timestamps are UTC ms; convert to tz-aware ET for consistent display/logic
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True).dt.tz_convert(ET_TZ)
     df.set_index("Timestamp", inplace=True)
 
@@ -107,16 +116,30 @@ def get_gspread_client():
 def _parse_time_to_et(series: pd.Series) -> pd.Series:
     """
     Parse times from Sheets into tz-aware ET timestamps.
-    - If the value has an offset / tz info: convert to ET
-    - If tz-naive (older logs): assume it was UTC (from the old app) and convert to ET
+
+    Robust strategy:
+    - Always parse with utc=True (handles values with offsets and tz-naive values)
+    - Convert parsed values to ET
+
+    This keeps older tz-naive logs (which were effectively UTC in the original app) correct,
+    and also correctly parses new values written with explicit -0500/-0400 offsets.
     """
-    s = pd.to_datetime(series, errors="coerce")
-    # tz-naive -> assume UTC then convert to ET
-    if getattr(s.dt, "tz", None) is None:
-        s = s.dt.tz_localize("UTC").dt.tz_convert(ET_TZ)
-    else:
-        s = s.dt.tz_convert(ET_TZ)
-    return s
+    if series is None:
+        return pd.Series(dtype="datetime64[ns, America/New_York]")
+
+    s = pd.to_datetime(series, errors="coerce", utc=True)
+    return s.dt.tz_convert(ET_TZ)
+
+
+def _format_times_for_table(series: pd.Series) -> pd.Series:
+    """Format timestamps for display (prevents Streamlit/Styler showing blanks/None)."""
+    # Keep a raw string fallback in case pandas can't parse a particular value.
+    raw_str = series.astype(str).replace({"NaT": "", "None": ""})
+
+    s = _parse_time_to_et(series)
+    formatted = s.dt.strftime("%Y-%m-%d %H:%M:%S %Z").fillna("")
+    # If parsing failed (blank formatted), fall back to the raw value.
+    return formatted.where(formatted != "", raw_str)
 
 
 def load_history_from_sheets():
@@ -190,6 +213,7 @@ if _fragment is None:
     def _fragment(*args, **kwargs):
         def _wrap(func):
             return func
+
         return _wrap
 
 
@@ -295,7 +319,7 @@ with tab1:
             prediction_time = datetime.now(ET_TZ).replace(microsecond=0)
             target_time = prediction_time + timedelta(minutes=5)
 
-            # Prevent duplicate predictions for the same latest 1-minute candle (even though we log seconds now)
+            # Prevent duplicate predictions for the same latest 1-minute candle
             if not history_df.empty and "Prediction_Time" in history_df.columns:
                 last_pred_time = history_df["Prediction_Time"].iloc[-1]
                 try:
@@ -305,88 +329,47 @@ with tab1:
 
                 if last_pred_floor is not None and last_pred_floor == pd.Timestamp(candle_time).floor("min"):
                     st.warning("Prediction already generated for the latest 1-minute candle. Wait for the next candle.")
-                else:
-                    prediction_val = model.predict(current_state)[0]
-                    probabilities = model.predict_proba(current_state)[0]
+                    st.stop()
 
-                    direction = "UP" if prediction_val == 1 else "DOWN"
-                    confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
-                    confidence_pct = confidence * 100
+            prediction_val = model.predict(current_state)[0]
+            probabilities = model.predict_proba(current_state)[0]
 
-                    if confidence_pct < 55:
-                        signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
-                        color = "orange"
-                    elif confidence_pct < 60:
-                        signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
-                        color = "blue"
-                    else:
-                        signal_strength = "🔥 STRONG SIGNAL (High Probability)"
-                        color = "green"
+            direction = "UP" if prediction_val == 1 else "DOWN"
+            confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
+            confidence_pct = confidence * 100
 
-                    st.markdown(f"### Prediction Time: {prediction_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                    st.markdown(f"### Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Current BTC Price", f"${current_price:,.2f}")
-                    col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
-                    col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
-
-                    st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
-
-                    if sheet:
-                        # Store ISO 8601 strings with timezone offset for unambiguous parsing & sorting
-                        new_row = [
-                            prediction_time.isoformat(),
-                            current_price,
-                            direction,
-                            round(confidence_pct, 2),
-                            target_time.isoformat(),
-                            "",
-                            "Pending",
-                        ]
-                        sheet.append_row(new_row)
-                        st.success("✅ Prediction successfully logged to Google Sheets!")
+            if confidence_pct < 55:
+                signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
+                color = "orange"
+            elif confidence_pct < 60:
+                signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
+                color = "blue"
             else:
-                # No history yet — proceed normally
-                prediction_val = model.predict(current_state)[0]
-                probabilities = model.predict_proba(current_state)[0]
+                signal_strength = "🔥 STRONG SIGNAL (High Probability)"
+                color = "green"
 
-                direction = "UP" if prediction_val == 1 else "DOWN"
-                confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
-                confidence_pct = confidence * 100
+            st.markdown(f"### Prediction Time: {prediction_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            st.markdown(f"### Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-                if confidence_pct < 55:
-                    signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
-                    color = "orange"
-                elif confidence_pct < 60:
-                    signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
-                    color = "blue"
-                else:
-                    signal_strength = "🔥 STRONG SIGNAL (High Probability)"
-                    color = "green"
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Current BTC Price", f"${current_price:,.2f}")
+            col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
+            col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
 
-                st.markdown(f"### Prediction Time: {prediction_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                st.markdown(f"### Target Time: {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Current BTC Price", f"${current_price:,.2f}")
-                col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
-                col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
-
-                st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
-
-                if sheet:
-                    new_row = [
-                        prediction_time.isoformat(),
-                        current_price,
-                        direction,
-                        round(confidence_pct, 2),
-                        target_time.isoformat(),
-                        "",
-                        "Pending",
-                    ]
-                    sheet.append_row(new_row)
-                    st.success("✅ Prediction successfully logged to Google Sheets!")
+            if sheet:
+                new_row = [
+                    dt_to_sheet_str(prediction_time),
+                    current_price,
+                    direction,
+                    round(confidence_pct, 2),
+                    dt_to_sheet_str(target_time),
+                    "",
+                    "Pending",
+                ]
+                sheet.append_row(new_row, value_input_option="RAW")
+                st.success("✅ Prediction successfully logged to Google Sheets!")
 
 with tab2:
     st.markdown("### Model Performance Analytics")
@@ -434,10 +417,13 @@ with tab2:
         with st.spinner("Rendering 24-hour chart..."):
             chart_data = get_24h_chart_data()
 
+            # Plotly is happiest with tz-naive datetimes for axes; keep ET wall-clock.
+            chart_x = chart_data.index.tz_localize(None)
+
             fig = go.Figure(
                 data=[
                     go.Candlestick(
-                        x=chart_data.index,
+                        x=chart_x,
                         open=chart_data["Open"],
                         high=chart_data["High"],
                         low=chart_data["Low"],
@@ -454,9 +440,13 @@ with tab2:
                 color = "green" if row["Outcome"] == "Win" else "red" if row["Outcome"] == "Loss" else "yellow"
                 size = 14 if row["Outcome"] != "Pending" else 10
 
+                x_ts = row.get("Prediction_Time")
+                if pd.notna(x_ts) and hasattr(x_ts, "tzinfo") and x_ts.tzinfo is not None:
+                    x_ts = x_ts.tz_convert(ET_TZ).tz_localize(None)
+
                 fig.add_trace(
                     go.Scatter(
-                        x=[row["Prediction_Time"]],
+                        x=[x_ts],
                         y=[row["Entry_Price"]],
                         mode="markers",
                         marker=dict(symbol=symbol, size=size, color=color, line=dict(width=2, color="white")),
@@ -499,7 +489,9 @@ with tab2:
             down_trades = completed_trades[completed_trades["Prediction"] == "DOWN"]
 
             up_wr = (
-                (len(up_trades[up_trades["Outcome"] == "Win"]) / len(up_trades) * 100) if len(up_trades) > 0 else 0.0
+                (len(up_trades[up_trades["Outcome"] == "Win"]) / len(up_trades) * 100)
+                if len(up_trades) > 0
+                else 0.0
             )
             down_wr = (
                 (len(down_trades[down_trades["Outcome"] == "Win"]) / len(down_trades) * 100)
@@ -535,7 +527,18 @@ with tab2:
                 return "background-color: rgba(255, 0, 0, 0.15)"
             return ""
 
-        st.dataframe(history.iloc[::-1].style.map(highlight_outcome, subset=["Outcome"]), use_container_width=True)
+        # Streamlit + Styler can be flaky with tz-aware datetimes in a dataframe.
+        # For display, convert the datetime columns to ET strings (seconds + EST/EDT).
+        display_history = history.copy()
+        if "Prediction_Time" in display_history.columns:
+            display_history["Prediction_Time"] = _format_times_for_table(display_history["Prediction_Time"])
+        if "Target_Time" in display_history.columns:
+            display_history["Target_Time"] = _format_times_for_table(display_history["Target_Time"])
+
+        st.dataframe(
+            display_history.iloc[::-1].style.map(highlight_outcome, subset=["Outcome"]),
+            use_container_width=True,
+        )
 
     else:
         st.info("No predictions found in the Google Sheet yet. Run a prediction to start tracking!")
