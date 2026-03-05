@@ -1,15 +1,16 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import ta
 import ccxt
 import joblib
 import plotly.graph_objects as go
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 # --- 1. Page Setup ---
 st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
 st.title("🤖 Bitcoin 5-Minute AI Predictor")
-st.markdown("This dashboard uses a trained Random Forest model to predict if BTC will close higher in the next 5 minutes.")
 
 # --- 2. Load the Brain ---
 @st.cache_resource
@@ -18,14 +19,12 @@ def load_model():
 
 try:
     model = load_model()
-    st.sidebar.success("✅ AI Model Loaded Successfully")
 except Exception as e:
-    st.error(f"Could not load the model. Make sure 'btc_5m_rf_model.joblib' is in the folder. Error: {e}")
+    st.error(f"Could not load the model. Error: {e}")
     st.stop()
 
 # --- 3. Live Data Fetcher & Feature Engineer ---
 def get_live_prediction_data():
-    # Fetch the last 100 minutes of data to calculate indicators
     exchange = ccxt.binanceus({'enableRateLimit': True})
     ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1m', limit=100)
     
@@ -33,7 +32,7 @@ def get_live_prediction_data():
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
     df.set_index('Timestamp', inplace=True)
     
-    # Calculate the exact same features the model was trained on
+    # Calculate features
     df['RSI_14'] = ta.momentum.rsi(df['Close'], window=14)
     df['MACD'] = ta.trend.macd(df['Close'], window_slow=26, window_fast=12)
     df['MACD_Signal'] = ta.trend.macd_signal(df['Close'], window_slow=26, window_fast=12, window_sign=9)
@@ -43,45 +42,147 @@ def get_live_prediction_data():
     df['BB_Lower'] = ta.volatility.bollinger_lband(df['Close'], window=20, window_dev=2)
     df['Volume_ROC'] = df['Volume'].pct_change(periods=5)
     
-    # Clean up infinities and NaNs just like in training
-    import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
     
     return df
 
-# --- 4. UI and Logic ---
-if st.button("🔮 Generate Live Prediction", type="primary"):
-    with st.spinner("Fetching live exchange data and consulting AI..."):
-        # Get data
-        live_data = get_live_prediction_data()
+# --- 4. Tracker System (Lazy Evaluator) ---
+HISTORY_FILE = "trade_history.csv"
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        return pd.read_csv(HISTORY_FILE, parse_dates=['Prediction_Time', 'Target_Time'])
+    else:
+        return pd.DataFrame(columns=['Prediction_Time', 'Entry_Price', 'Prediction', 'Confidence', 'Target_Time', 'Close_Price', 'Outcome'])
+
+def save_history(df):
+    df.to_csv(HISTORY_FILE, index=False)
+
+def resolve_pending_trades(live_data):
+    history = load_history()
+    if history.empty: return history
+    
+    pending_mask = history['Outcome'] == 'Pending'
+    
+    for idx, row in history[pending_mask].iterrows():
+        target_time = row['Target_Time']
         
-        # Grab the absolute newest row of data
-        current_state = live_data.iloc[-1:]
-        current_price = current_state['Close'].values[0]
-        current_rsi = current_state['RSI_14'].values[0]
-        
-        # Ask the AI to predict
-        prediction = model.predict(current_state)[0]
-        probability = model.predict_proba(current_state)[0]
-        
-        # --- 5. Display Results ---
-        col1, col2, col3 = st.columns(3)
-        
-        col1.metric("Current BTC Price", f"${current_price:,.2f}")
-        col2.metric("Current RSI (14)", f"{current_rsi:.1f}")
-        
-        if prediction == 1:
-            col3.success(f"📈 AI Predicts UP (Confidence: {probability[1]*100:.1f}%)")
-        else:
-            col3.error(f"📉 AI Predicts DOWN (Confidence: {probability[0]*100:.1f}%)")
+        # Check if the target time has passed AND is in our recently downloaded live data
+        if target_time <= datetime.utcnow() and target_time in live_data.index:
+            actual_close = live_data.loc[target_time, 'Close']
+            entry_price = row['Entry_Price']
+            prediction = row['Prediction']
             
-        # Draw a quick chart
-        st.subheader("Last 60 Minutes of Price Action")
-        fig = go.Figure(data=[go.Candlestick(x=live_data.index[-60:],
-                        open=live_data['Open'][-60:],
-                        high=live_data['High'][-60:],
-                        low=live_data['Low'][-60:],
-                        close=live_data['Close'][-60:])])
-        fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+            history.at[idx, 'Close_Price'] = actual_close
+            
+            # Grade the prediction
+            if prediction == 'UP' and actual_close > entry_price:
+                history.at[idx, 'Outcome'] = 'Win'
+            elif prediction == 'DOWN' and actual_close < entry_price:
+                history.at[idx, 'Outcome'] = 'Win'
+            else:
+                history.at[idx, 'Outcome'] = 'Loss'
+                
+    save_history(history)
+    return history
+
+
+# --- 5. UI Layout (Tabs) ---
+tab1, tab2 = st.tabs(["🔮 Live Predictor", "📊 Analytics & History"])
+
+with tab1:
+    st.markdown("### Generate Next Move")
+    if st.button("Generate Live Prediction", type="primary"):
+        with st.spinner("Fetching live data & analyzing..."):
+            live_data = get_live_prediction_data()
+            
+            # Auto-grade any pending trades while we have the fresh data!
+            resolve_pending_trades(live_data)
+            
+            current_state = live_data.iloc[-1:]
+            current_price = current_state['Close'].values[0]
+            current_time = current_state.index[0]
+            
+            # Predict
+            prediction_val = model.predict(current_state)[0]
+            probabilities = model.predict_proba(current_state)[0]
+            
+            direction = "UP" if prediction_val == 1 else "DOWN"
+            confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
+            confidence_pct = confidence * 100
+            
+            # Threshold Logic
+            if confidence_pct < 55:
+                signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
+                color = "orange"
+            elif confidence_pct < 60:
+                signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
+                color = "blue"
+            else:
+                signal_strength = "🔥 STRONG SIGNAL (High Probability)"
+                color = "green"
+
+            # Display Results
+            st.markdown(f"### Target Time: {(current_time + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Current BTC Price", f"${current_price:,.2f}")
+            col2.metric("AI Prediction", f"{direction}", delta="Long" if direction=="UP" else "-Short")
+            col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
+            
+            st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
+            
+            # Log the prediction
+            history = load_history()
+            new_trade = pd.DataFrame([{
+                'Prediction_Time': current_time,
+                'Entry_Price': current_price,
+                'Prediction': direction,
+                'Confidence': round(confidence_pct, 2),
+                'Target_Time': current_time + timedelta(minutes=5),
+                'Close_Price': np.nan,
+                'Outcome': 'Pending'
+            }])
+            history = pd.concat([history, new_trade], ignore_index=True)
+            save_history(history)
+            st.success("Prediction logged to history tracker.")
+
+with tab2:
+    st.markdown("### Forward Testing Analytics")
+    
+    # Reload and resolve any pending data just in case
+    try:
+        live_data = get_live_prediction_data()
+        history = resolve_pending_trades(live_data)
+    except:
+        history = load_history()
+    
+    if not history.empty:
+        # Metrics
+        completed_trades = history[history['Outcome'].isin(['Win', 'Loss'])]
+        total_completed = len(completed_trades)
+        wins = len(completed_trades[completed_trades['Outcome'] == 'Win'])
+        
+        win_rate = (wins / total_completed * 100) if total_completed > 0 else 0
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Completed Predictions", total_completed)
+        m2.metric("Real-World Win Rate", f"{win_rate:.1f}%")
+        m3.metric("Pending Predictions", len(history[history['Outcome'] == 'Pending']))
+        
+        # Display the Tracker
+        st.markdown("#### Permanent Tracker Log")
+        
+        # Style the dataframe so Wins are green and Losses are red
+        def highlight_outcome(val):
+            if val == 'Win': return 'background-color: #004d00'
+            elif val == 'Loss': return 'background-color: #4d0000'
+            return ''
+            
+        st.dataframe(history.style.map(highlight_outcome, subset=['Outcome']), use_container_width=True)
+        
+        st.markdown("*Note: Pending predictions are automatically graded the next time you generate a prediction after 5 minutes have passed.*")
+        
+    else:
+        st.info("No predictions generated yet. Go to the Live Predictor tab to start tracking!")
