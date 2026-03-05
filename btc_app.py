@@ -259,7 +259,6 @@ with tab2:
         col_live, col_stats1, col_stats2 = st.columns([1.5, 1, 1])
         
         with col_live:
-            live_price_ticker()
             if live_price:
                 st.metric("Live BTC/USDT Price", f"${live_price:,.2f}")
                 
