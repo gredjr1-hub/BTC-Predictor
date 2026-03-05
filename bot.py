@@ -30,7 +30,7 @@ def get_sheet():
 
 # --- 2. Live Data ---
 def get_data():
-    exchange = ccxt.binanceus({'enableRateLimit': True})
+    exchange = ccxt.kraken({'enableRateLimit': True})
     ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1m', limit=100)
     df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
