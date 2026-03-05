@@ -255,33 +255,33 @@ with tab2:
         st.markdown("#### ⚡ Live Market & Advanced Stats")
         
         @st.fragment(run_every=2)  # Refreshes every 2 seconds
-def live_price_ticker():
-    live_price = get_live_ticker_price()
-    if live_price:
-        # We use a container to ensure the metric doesn't "jump" or duplicate
-        with st.container():
-            st.metric(
-                label="BTC/USDT Live Price (Kraken)",
-                value=f"${live_price:,.2f}",
-                delta=None # You can calculate a 2s change here if you want!
-            )
-            
-            # Re-check open bets against the freshest price
-            pending_trades = history[history['Outcome'] == 'Pending']
-            if not pending_trades.empty:
-                st.markdown("🔍 **Real-Time PnL Tracking:**")
-                for _, row in pending_trades.iterrows():
-                    entry = float(row['Entry_Price'])
-                    direction = row['Prediction']
-                    diff = live_price - entry if direction == 'UP' else entry - live_price
-                    status_color = "green" if diff > 0 else "red"
-                    
-                    st.markdown(
-                        f"**{direction}** from ${entry:,.2f} → "
-                        f":{status_color}[${abs(diff):,.2f} {'Profit' if diff > 0 else 'Loss'}]"
-                    )
-    else:
-        st.write("⌛ Syncing with Kraken...")
+    def live_price_ticker():
+        live_price = get_live_ticker_price()
+        if live_price:
+            # We use a container to ensure the metric doesn't "jump" or duplicate
+            with st.container():
+                st.metric(
+                    label="BTC/USDT Live Price (Kraken)",
+                    value=f"${live_price:,.2f}",
+                    delta=None # You can calculate a 2s change here if you want!
+                )
+                
+                # Re-check open bets against the freshest price
+                pending_trades = history[history['Outcome'] == 'Pending']
+                if not pending_trades.empty:
+                    st.markdown("🔍 **Real-Time PnL Tracking:**")
+                    for _, row in pending_trades.iterrows():
+                        entry = float(row['Entry_Price'])
+                        direction = row['Prediction']
+                        diff = live_price - entry if direction == 'UP' else entry - live_price
+                        status_color = "green" if diff > 0 else "red"
+                        
+                        st.markdown(
+                            f"**{direction}** from ${entry:,.2f} → "
+                            f":{status_color}[${abs(diff):,.2f} {'Profit' if diff > 0 else 'Loss'}]"
+                        )
+        else:
+            st.write("⌛ Syncing with Kraken...")
 
         with col_stats1:
             st.markdown("**Core Win Rates:**")
