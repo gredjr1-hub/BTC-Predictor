@@ -254,34 +254,31 @@ with tab2:
         # --- Live Market & Advanced Stats ---
         st.markdown("#### ⚡ Live Market & Advanced Stats")
         
-        @st.fragment(run_every=2)  # Refreshes every 2 seconds
-    def live_price_ticker():
         live_price = get_live_ticker_price()
-        if live_price:
-            # We use a container to ensure the metric doesn't "jump" or duplicate
-            with st.container():
-                st.metric(
-                    label="BTC/USDT Live Price (Kraken)",
-                    value=f"${live_price:,.2f}",
-                    delta=None # You can calculate a 2s change here if you want!
-                )
+        
+        col_live, col_stats1, col_stats2 = st.columns([1.5, 1, 1])
+        
+        with col_live:
+            live_price_ticker()
+            if live_price:
+                st.metric("Live BTC/USDT Price", f"${live_price:,.2f}")
                 
-                # Re-check open bets against the freshest price
                 pending_trades = history[history['Outcome'] == 'Pending']
                 if not pending_trades.empty:
-                    st.markdown("🔍 **Real-Time PnL Tracking:**")
+                    st.markdown("**Active Open Bets:**")
                     for _, row in pending_trades.iterrows():
                         entry = float(row['Entry_Price'])
                         direction = row['Prediction']
+                        
                         diff = live_price - entry if direction == 'UP' else entry - live_price
                         status_color = "green" if diff > 0 else "red"
+                        status_icon = "🟢 Profit" if diff > 0 else "🔴 Drawdown"
                         
-                        st.markdown(
-                            f"**{direction}** from ${entry:,.2f} → "
-                            f":{status_color}[${abs(diff):,.2f} {'Profit' if diff > 0 else 'Loss'}]"
-                        )
-        else:
-            st.write("⌛ Syncing with Kraken...")
+                        st.markdown(f"- {direction} from **${entry:,.2f}** | :{status_color}[{status_icon} (${abs(diff):,.2f})]")
+                else:
+                    st.markdown("*No active bets currently open.*")
+            else:
+                st.warning("Could not fetch live price.")
 
         with col_stats1:
             st.markdown("**Core Win Rates:**")
