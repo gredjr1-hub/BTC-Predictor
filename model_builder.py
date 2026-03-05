@@ -3,27 +3,23 @@ import ta
 
 def prepare_data(filepath):
     print("Loading data...")
-    df = pd.read_parquet(filepath)
+    # READ CSV INSTEAD OF PARQUET
+    df = pd.read_csv(filepath)
+    
+    # CSVs lose their datetime index type when saved, so we must restore it
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    df.set_index('Timestamp', inplace=True)
     
     print("Calculating Technical Indicators (Features)...")
     
     # 1. Momentum & Trend Indicators using 'ta'
-    # RSI
     df['RSI_14'] = ta.momentum.rsi(df['Close'], window=14)
-    
-    # MACD (We'll grab the main MACD line and the Signal line)
     df['MACD'] = ta.trend.macd(df['Close'], window_slow=26, window_fast=12)
     df['MACD_Signal'] = ta.trend.macd_signal(df['Close'], window_slow=26, window_fast=12, window_sign=9)
-    
-    # Moving Averages (EMA)
     df['EMA_9'] = ta.trend.ema_indicator(df['Close'], window=9)
     df['EMA_21'] = ta.trend.ema_indicator(df['Close'], window=21)
-    
-    # Bollinger Bands (Upper and Lower bands)
     df['BB_Upper'] = ta.volatility.bollinger_hband(df['Close'], window=20, window_dev=2)
     df['BB_Lower'] = ta.volatility.bollinger_lband(df['Close'], window=20, window_dev=2)
-
-    # Volume Rate of Change
     df['Volume_ROC'] = df['Volume'].pct_change(periods=5)
 
     print("Generating Target Variable...")
@@ -38,14 +34,16 @@ def prepare_data(filepath):
     
     print(f"Data ready! Final shape: {df.shape}")
     
-    processed_filename = filepath.replace('history.parquet', 'processed.parquet')
-    df.to_parquet(processed_filename)
+    # SAVE AS CSV
+    processed_filename = filepath.replace('history.csv', 'processed.csv')
+    df.to_csv(processed_filename)
     print(f"Processed data saved to {processed_filename}")
     
     return df
 
 if __name__ == "__main__":
-    processed_df = prepare_data("BTCUSDT_1m_history.parquet")
+    # Point to the CSV file you just downloaded
+    processed_df = prepare_data("BTCUSDT_1m_history.csv")
     
     up_count = (processed_df['Target'] == 1).sum()
     down_count = (processed_df['Target'] == 0).sum()
