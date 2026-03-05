@@ -6,3 +6,5 @@ joblib
 ccxt
 plotly
 streamlit-autorefresh
+gspread
+google-auth
