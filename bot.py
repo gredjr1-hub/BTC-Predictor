@@ -106,7 +106,7 @@ if __name__ == "__main__":
         float(current_price),
         direction,
         round(conf * 100, 2),
-        str(current_time + timedelta(minutes=15)),
+        str(current_time + timedelta(minutes=5)),
         "", # Close_Price (Blank until graded)
         "Pending" # Outcome
     ]
