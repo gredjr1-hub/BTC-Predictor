@@ -182,6 +182,7 @@ def get_live_prediction_data():
     df["BB_Upper"] = ta.volatility.bollinger_hband(df["Close"], window=20, window_dev=2)
     df["BB_Lower"] = ta.volatility.bollinger_lband(df["Close"], window=20, window_dev=2)
     df["Volume_ROC"] = df["Volume"].pct_change(periods=5)
+    df["Price_Delta_From_Window_Start"] = (df["Close"] - df["Close"].shift(5)) / df["Close"].shift(5)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
@@ -236,6 +237,11 @@ def load_history_from_sheets():
             df["Polymarket_Odds"] = np.nan
         else:
             df["Polymarket_Odds"] = pd.to_numeric(df["Polymarket_Odds"], errors="coerce")
+        # Gracefully handle sheets that predate the Window_Start_Price column
+        if "Window_Start_Price" not in df.columns:
+            df["Window_Start_Price"] = np.nan
+        else:
+            df["Window_Start_Price"] = pd.to_numeric(df["Window_Start_Price"], errors="coerce")
         return df, sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
@@ -257,13 +263,20 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
 
             if not valid_candles.empty:
                 actual_close = valid_candles["Close"].iloc[0]
-                entry_price = float(row["Entry_Price"])
                 prediction = row["Prediction"]
+
+                # Use window start price if available; fall back to entry price for legacy rows
+                ref_price_raw = row.get("Window_Start_Price")
+                ref_price = (
+                    float(ref_price_raw)
+                    if pd.notna(ref_price_raw) and float(ref_price_raw) > 0
+                    else float(row["Entry_Price"])
+                )
 
                 outcome = (
                     "Win"
-                    if (prediction == "UP" and actual_close > entry_price)
-                    or (prediction == "DOWN" and actual_close < entry_price)
+                    if (prediction == "UP" and actual_close > ref_price)
+                    or (prediction == "DOWN" and actual_close < ref_price)
                     else "Loss"
                 )
 
@@ -412,6 +425,17 @@ with tab1:
 
             target_time = snap_to_polymarket_window(current_time)
 
+            # Window start = 5 minutes before target_time
+            window_start_time = target_time - timedelta(minutes=5)
+
+            # Look up start-of-window price from live_data (already fetched)
+            window_start_candles = live_data[live_data.index == window_start_time]
+            if not window_start_candles.empty:
+                window_start_price = float(window_start_candles["Close"].values[0])
+            else:
+                # Fallback: use current price (same behavior as before)
+                window_start_price = current_price
+
             # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
             fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
             pm_odds = fetch_polymarket_odds(target_time)
@@ -477,13 +501,14 @@ with tab1:
                     odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
                     new_row = [
                         str(current_time),
-                        current_price,
+                        current_price,          # Entry_Price (when bet was placed)
                         direction,
                         round(confidence_pct, 2),
                         str(target_time),
-                        "",          # Close_Price (filled by resolver)
-                        "Pending",   # Outcome (filled by resolver)
-                        odds_val,    # Polymarket_Odds
+                        "",                     # Close_Price (filled by resolver)
+                        "Pending",              # Outcome (filled by resolver)
+                        odds_val,               # Polymarket_Odds
+                        window_start_price,     # Window_Start_Price (col 9)
                     ]
                     sheet.append_row(new_row)
                     st.success("✅ Prediction successfully logged to Google Sheets!")
@@ -697,6 +722,21 @@ with tab3:
             fetch_polymarket_odds.clear()
             st.rerun()
         current_window_target = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
+
+        with st.expander("🔍 Odds fetch diagnostics", expanded=False):
+            _diag_ts = int(current_window_target.replace(tzinfo=timezone.utc).timestamp())
+            _diag_slug = f"btc-updown-5m-{_diag_ts}"
+            _diag_url = f"https://gamma-api.polymarket.com/events?slug={_diag_slug}"
+            st.write(f"**Window target (UTC):** `{current_window_target}`")
+            st.write(f"**Slug tried:** `{_diag_slug}`")
+            st.write(f"**API URL:** `{_diag_url}`")
+            try:
+                import requests as _req
+                _raw = _req.get(_diag_url, timeout=5).json()
+                st.json(_raw)
+            except Exception as _e:
+                st.error(f"Request failed: {_e}")
+
         live_odds = fetch_polymarket_odds(current_window_target)
 
         if live_odds:

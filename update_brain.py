@@ -46,7 +46,8 @@ def build_features(df):
     df['BB_Upper'] = ta.volatility.bollinger_hband(df['Close'], window=20, window_dev=2)
     df['BB_Lower'] = ta.volatility.bollinger_lband(df['Close'], window=20, window_dev=2)
     df['Volume_ROC'] = df['Volume'].pct_change(periods=5)
-    
+    df['Price_Delta_From_Window_Start'] = (df['Close'] - df['Close'].shift(5)) / df['Close'].shift(5)
+
     df['Target'] = (df['Close'].shift(-5) > df['Close']).astype(int)
     
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
