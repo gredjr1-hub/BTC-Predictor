@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import ta
 import ccxt
+import os
 import joblib
 import gspread
 from google.oauth2.service_account import Credentials
