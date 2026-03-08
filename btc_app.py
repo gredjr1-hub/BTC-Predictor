@@ -68,12 +68,12 @@ def get_polymarket_url():
 
 @st.cache_data(ttl=30)
 def fetch_polymarket_odds(target_time):
-    """Fetch UP/DOWN prices for the Polymarket 5-min BTC window closing at target_time.
+    """Fetch UP/DOWN prices for the Polymarket 5-min BTC window opening 5 minutes before target_time.
     Returns {"up": float, "down": float, "slug": str} or None on failure.
     """
     import json
     import requests as _requests
-    ts = int(target_time.replace(tzinfo=timezone.utc).timestamp())
+    ts = int(target_time.replace(tzinfo=timezone.utc).timestamp()) - 300  # Polymarket slugs use window open time
     slug = f"btc-updown-5m-{ts}"
     try:
         resp = _requests.get(
