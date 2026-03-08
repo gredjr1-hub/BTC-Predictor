@@ -9,7 +9,8 @@ def prepare_data(filepath):
     # CSVs lose their datetime index type when saved, so we must restore it
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     df.set_index('Timestamp', inplace=True)
-    
+    df = df[df.index.minute % 5 == 0]  # train only on boundary candles (:00/:05/:10...)
+
     print("Calculating Technical Indicators (Features)...")
     
     # 1. Momentum & Trend Indicators using 'ta'
@@ -29,6 +30,7 @@ def prepare_data(filepath):
 
     print("Cleaning up data...")
     # 3. Cleanup
+    df.replace([float('inf'), float('-inf')], float('nan'), inplace=True)
     df.dropna(inplace=True)
     df.drop(columns=['Future_Close_5m'], inplace=True)
     

@@ -51,6 +51,7 @@ def build_features(df):
     
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
+    df = df[df['Timestamp'].dt.minute % 5 == 0]  # train only on boundary candles (:00/:05/:10...)
     return df
 
 def stitch_and_train(new_data):
@@ -73,6 +74,8 @@ def stitch_and_train(new_data):
     combined_df.to_csv(MASTER_FILE, index=False)
     
     print("🧠 Retraining the AI on the expanded timeline...")
+    combined_df.replace([float('inf'), float('-inf')], float('nan'), inplace=True)
+    combined_df.dropna(inplace=True)
     combined_df.set_index('Timestamp', inplace=True)
     X = combined_df.drop(columns=['Target'])
     y = combined_df['Target']
