@@ -70,29 +70,40 @@ def fetch_polymarket_odds(target_time):
     """Fetch UP/DOWN prices for the Polymarket 5-min BTC window closing at target_time.
     Returns {"up": float, "down": float, "slug": str} or None on failure.
     """
+    import json
     import requests as _requests
     ts = int(target_time.replace(tzinfo=timezone.utc).timestamp())
     slug = f"btc-updown-5m-{ts}"
     try:
         resp = _requests.get(
-            f"https://gamma-api.polymarket.com/markets?slug={slug}",
+            f"https://gamma-api.polymarket.com/events?slug={slug}",
             timeout=5,
         )
         data = resp.json()
         if not data:
             return None
-        market = data[0] if isinstance(data, list) else data
-        outcomes = market.get("outcomes", [])
-        prices = market.get("outcomePrices", [])
-        if len(outcomes) < 2 or len(prices) < 2:
+        event = data[0] if isinstance(data, list) else data
+        markets = event.get("markets", [])
+        if not markets:
             return None
+
         result = {}
-        for outcome, price in zip(outcomes, prices):
-            key = outcome.strip().lower()
-            if "up" in key:
-                result["up"] = float(price)
-            elif "down" in key:
-                result["down"] = float(price)
+        for market in markets:
+            raw_outcomes = market.get("outcomes", "[]")
+            raw_prices = market.get("outcomePrices", "[]")
+            if isinstance(raw_outcomes, str):
+                outcomes = json.loads(raw_outcomes)
+                prices = json.loads(raw_prices)
+            else:
+                outcomes = raw_outcomes
+                prices = raw_prices
+            for outcome, price in zip(outcomes, prices):
+                key = str(outcome).strip().lower()
+                if "up" in key:
+                    result["up"] = float(price)
+                elif "down" in key:
+                    result["down"] = float(price)
+
         if "up" not in result or "down" not in result:
             return None
         result["slug"] = slug
@@ -435,6 +446,13 @@ with tab1:
                 col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
 
                 st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
+
+                # Window countdown
+                _now = datetime.utcnow()
+                _seconds_left = max(0, int((target_time - _now).total_seconds()))
+                _mins, _secs = divmod(_seconds_left, 60)
+                _countdown_color = "green" if _seconds_left > 180 else "orange" if _seconds_left > 60 else "red"
+                st.markdown(f"**⏱️ Window closes in:** :{_countdown_color}[{_mins}m {_secs:02d}s]")
 
                 # Polymarket odds row
                 if pm_odds:
