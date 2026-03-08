@@ -413,6 +413,7 @@ with tab1:
             target_time = snap_to_polymarket_window(current_time)
 
             # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
+            fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
             pm_odds = fetch_polymarket_odds(target_time)
 
             if not history_df.empty and (history_df["Target_Time"] == target_time).any():
@@ -692,6 +693,9 @@ with tab3:
 
     with col_odds:
         st.markdown("#### Live Odds — Current Window")
+        if st.button("🔄 Refresh Odds", key="refresh_polymarket_odds"):
+            fetch_polymarket_odds.clear()
+            st.rerun()
         current_window_target = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
         live_odds = fetch_polymarket_odds(current_window_target)
 
@@ -709,7 +713,7 @@ with tab3:
             )
             st.caption(
                 f"Market: `{live_odds['slug']}` · Window closes at "
-                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 30s"
+                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 30s · use button above for immediate refresh"
             )
         else:
             st.warning(
@@ -760,7 +764,12 @@ with tab4:
             STARTING_BALANCE = 1000.0
             STANDARD_BET_PCT = 0.025
             HIGH_CONF_BET_PCT = 0.05
-            HIGH_CONF_THRESHOLD = 60.0
+
+            # Dynamic threshold: top 10% confidence scores get the larger bet
+            if len(completed_with_odds) >= 10:
+                HIGH_CONF_THRESHOLD = completed_with_odds["Confidence"].quantile(0.90)
+            else:
+                HIGH_CONF_THRESHOLD = 60.0  # fallback when history is thin
 
             balance = STARTING_BALANCE
             trades_log = []
@@ -806,6 +815,10 @@ with tab4:
             )
             kpi3.metric("Total P&L", f"${total_pnl:+,.2f}")
             kpi4.metric("ROI", f"{roi_pct:+.2f}%")
+            st.caption(
+                f"High-confidence threshold: {HIGH_CONF_THRESHOLD:.1f}% "
+                f"({'top 10% of ' + str(len(completed_with_odds)) + ' completed trades' if len(completed_with_odds) >= 10 else 'fallback — fewer than 10 trades'})"
+            )
             st.divider()
 
             # --- Balance-over-time chart ---
