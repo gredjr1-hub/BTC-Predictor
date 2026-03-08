@@ -770,7 +770,8 @@ with tab4:
     st.markdown(
         "Simulates portfolio growth starting from **$1,000** using your logged predictions, "
         "Polymarket odds at bet time, and actual outcomes. "
-        "Standard bets are **2.5%** of current balance; predictions with ≥60% confidence use **5%**."
+        "Bet sizing scales with confidence and market odds — contrarian bets (market <50%) scale 2.5–5%, "
+        "high-odds markets (≥65%) require ≥60% confidence, standard zone is flat 2.5%."
     )
 
     # Load history (may already be loaded in tab2 context, but tabs are independent blocks)
@@ -802,14 +803,10 @@ with tab4:
         else:
             # --- Simulation constants ---
             STARTING_BALANCE = 1000.0
-            STANDARD_BET_PCT = 0.025
-            HIGH_CONF_BET_PCT = 0.05
-
-            # Dynamic threshold: top 10% confidence scores get the larger bet
-            if len(completed_with_odds) >= 10:
-                HIGH_CONF_THRESHOLD = completed_with_odds["Confidence"].quantile(0.90)
-            else:
-                HIGH_CONF_THRESHOLD = 60.0  # fallback when history is thin
+            MIN_BET_PCT = 0.025          # 2.5% — floor for all bets
+            MAX_BET_PCT = 0.05           # 5.0% — hard cap
+            HIGH_ODDS_THRESHOLD = 0.65   # market strongly agrees → payout < 1.54x
+            MIN_CONF_FOR_HIGH_ODDS = 60.0  # require this confidence to bet into a high-odds market
 
             balance = STARTING_BALANCE
             trades_log = []
@@ -817,7 +814,35 @@ with tab4:
             for _, row in completed_with_odds.iterrows():
                 conf = float(row["Confidence"])
                 odds = float(row["Polymarket_Odds"])
-                bet_pct = HIGH_CONF_BET_PCT if conf >= HIGH_CONF_THRESHOLD else STANDARD_BET_PCT
+
+                if odds >= HIGH_ODDS_THRESHOLD:
+                    # Market is very confident your direction wins → small payout
+                    # Skip unless AI is also highly confident
+                    if conf < MIN_CONF_FOR_HIGH_ODDS:
+                        trades_log.append({
+                            "Time": fmt_et(row["Prediction_Time"], "%m/%d %H:%M %Z"),
+                            "Direction": row["Prediction"],
+                            "Confidence": f"{conf:.1f}%",
+                            "Odds": f"{odds:.3f} ({odds*100:.1f}%)",
+                            "Bet %": "—",
+                            "Bet $": 0,
+                            "Outcome": "Skipped (low conf / high odds)",
+                            "P&L": 0,
+                            "Balance": round(balance, 2),
+                        })
+                        continue
+                    bet_pct = MIN_BET_PCT   # even with high conf, don't oversize a small-payout bet
+
+                elif odds < 0.5:
+                    # Contrarian — market disagrees, payout is large → scale up with confidence
+                    # Linear scale: 2.5% at conf=50 → 5% at conf=100
+                    bet_pct = min(MAX_BET_PCT, MIN_BET_PCT + (conf - 50) / 100 * MAX_BET_PCT)
+                    bet_pct = max(MIN_BET_PCT, bet_pct)   # floor at 2.5%
+
+                else:
+                    # Standard zone (0.50 ≤ odds < 0.65): flat 2.5%
+                    bet_pct = MIN_BET_PCT
+
                 bet_amount = balance * bet_pct
 
                 if row["Outcome"] == "Win":
@@ -856,8 +881,9 @@ with tab4:
             kpi3.metric("Total P&L", f"${total_pnl:+,.2f}")
             kpi4.metric("ROI", f"{roi_pct:+.2f}%")
             st.caption(
-                f"High-confidence threshold: {HIGH_CONF_THRESHOLD:.1f}% "
-                f"({'top 10% of ' + str(len(completed_with_odds)) + ' completed trades' if len(completed_with_odds) >= 10 else 'fallback — fewer than 10 trades'})"
+                f"Bet-sizing: contrarian (<50% odds) scales 2.5–5% by confidence · "
+                f"high-odds (≥{HIGH_ODDS_THRESHOLD*100:.0f}%) require ≥{MIN_CONF_FOR_HIGH_ODDS:.0f}% confidence · "
+                f"cap {MAX_BET_PCT*100:.0f}%"
             )
             st.divider()
 
@@ -914,6 +940,10 @@ with tab4:
                 sim_df.style.map(highlight_sim_outcome, subset=["Outcome"]),
                 use_container_width=True,
             )
+
+            skipped_count = sum(1 for t in trades_log if "Skipped" in str(t.get("Outcome", "")))
+            if skipped_count:
+                st.caption(f"{skipped_count} bet(s) skipped — high-odds market with insufficient AI confidence.")
 
             if excluded_count > 0:
                 st.info(
