@@ -154,12 +154,13 @@ def get_exchange():
 
 # --- 3. Load the Brain ---
 @st.cache_resource
-def load_model():
+def load_model(mtime=None):   # mtime as cache key forces reload when file changes on disk
     return joblib.load("btc_5m_rf_model.joblib")
 
 
 try:
-    model = load_model()
+    _model_mtime = os.path.getmtime("btc_5m_rf_model.joblib")
+    model = load_model(_model_mtime)
 except Exception as e:
     st.error(f"Could not load the model. Error: {e}")
     st.stop()
@@ -446,8 +447,11 @@ with tab1:
                     "Wait for the next 5-minute window."
                 )
             else:
-                prediction_val = model.predict(current_state)[0]
-                probabilities = model.predict_proba(current_state)[0]
+                # Align to model's exact feature set (guards against version mismatches)
+                _model_cols = list(model.feature_names_in_)
+                current_state_pred = current_state[_model_cols]
+                prediction_val = model.predict(current_state_pred)[0]
+                probabilities = model.predict_proba(current_state_pred)[0]
 
                 direction = "UP" if prediction_val == 1 else "DOWN"
                 confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
