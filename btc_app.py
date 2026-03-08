@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
 
 # --- Timezone helpers (display in Eastern Time; keep internal logic & Sheets in UTC-naive) ---
 ET_TZ = ZoneInfo("America/New_York")
@@ -55,17 +56,46 @@ def et_naive(dt):
             return None
 
 
+# --- Polymarket helpers ---
+def get_polymarket_url():
+    """Return the Polymarket market URL from secrets, or a placeholder if not configured."""
+    try:
+        return st.secrets["polymarket"]["url"]
+    except Exception:
+        return None
+
+
+def snap_to_polymarket_window(dt):
+    """Snap a UTC-naive datetime forward to the next :00/:05/:10... boundary.
+    If dt is already on a boundary, returns the NEXT boundary (next window close semantics).
+    """
+    # If exactly on a 5-min boundary, advance to the next one
+    if dt.second == 0 and dt.microsecond == 0 and dt.minute % 5 == 0:
+        return dt + timedelta(minutes=5)
+    # Otherwise snap forward to the next 5-min boundary
+    minutes_to_add = 5 - (dt.minute % 5)
+    return dt.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_add)
+
+
+def is_at_polymarket_boundary(dt):
+    """Return True if dt falls exactly on a :00/:05/:10... boundary."""
+    return dt.second == 0 and dt.minute % 5 == 0
+
+
 # --- 1. Page Setup & Live Sync ---
 st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
 st.title("🤖 Bitcoin AI Trading Terminal")
 
 st.sidebar.markdown("### ⚙️ Terminal Settings")
 auto_pilot = st.sidebar.toggle("Enable Live Sync (5m interval)")
+prediction_mode = st.sidebar.radio("Prediction Mode", ["Manual", "Auto"], index=0)
 
 if auto_pilot:
     # Full-app rerun every 5 minutes (kept for your existing "Live Sync" behavior)
     st_autorefresh(interval=300000, key="data_refresh")
     st.sidebar.success("Live Sync Active: Fetching latest data every 5 minutes.")
+if prediction_mode == "Auto" and not auto_pilot:
+    st.sidebar.info("Auto mode requires Live Sync to be enabled.")
 
 
 # --- 2. Exchange (cached) ---
@@ -291,11 +321,28 @@ def live_market_and_advanced_stats_fragment(
 
 
 # --- 7. UI Layout (Tabs) ---
-tab1, tab2 = st.tabs(["🔮 Live Predictor", "📊 Analytics & 24h Visualizer"])
+tab1, tab2, tab3 = st.tabs(["🔮 Live Predictor", "📊 Analytics & 24h Visualizer", "🎯 Polymarket Odds"])
 
 with tab1:
     st.markdown("### Generate Next Move")
-    if st.button("Generate Live Prediction", type="primary"):
+
+    # Session state for auto-prediction deduplication
+    if "last_auto_target" not in st.session_state:
+        st.session_state.last_auto_target = None
+
+    # Check whether auto-mode should fire this rerun
+    now_utc = datetime.utcnow().replace(microsecond=0)
+    auto_trigger = (
+        prediction_mode == "Auto"
+        and auto_pilot
+        and is_at_polymarket_boundary(now_utc)
+        and st.session_state.last_auto_target != snap_to_polymarket_window(now_utc)
+    )
+
+    if auto_trigger:
+        st.info("Auto-prediction firing at Polymarket window boundary...")
+
+    if st.button("Generate Live Prediction", type="primary") or auto_trigger:
         with st.spinner("Fetching live data & consulting AI..."):
             live_data = get_live_prediction_data()
             history_df, sheet = load_history_from_sheets()
@@ -306,8 +353,13 @@ with tab1:
             current_price = float(current_state["Close"].values[0])
             current_time = current_state.index[0]  # UTC-naive candle timestamp
 
-            if not history_df.empty and history_df["Prediction_Time"].iloc[-1] == current_time:
-                st.warning("Prediction already generated for this minute. Wait for the next candle.")
+            target_time = snap_to_polymarket_window(current_time)
+
+            if not history_df.empty and (history_df["Target_Time"] == target_time).any():
+                st.warning(
+                    f"Prediction already generated for window {fmt_et(target_time, '%H:%M %Z')}. "
+                    "Wait for the next 5-minute window."
+                )
             else:
                 prediction_val = model.predict(current_state)[0]
                 probabilities = model.predict_proba(current_state)[0]
@@ -326,8 +378,7 @@ with tab1:
                     signal_strength = "🔥 STRONG SIGNAL (High Probability)"
                     color = "green"
 
-                target_time = current_time + timedelta(minutes=5)
-                st.markdown(f"### Target Time: {fmt_et(target_time, '%H:%M %Z')}")
+                st.markdown(f"### Target Window: {fmt_et(target_time, '%H:%M %Z')}")
 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Current BTC Price", f"${current_price:,.2f}")
@@ -349,6 +400,8 @@ with tab1:
                     ]
                     sheet.append_row(new_row)
                     st.success("✅ Prediction successfully logged to Google Sheets!")
+
+                st.session_state.last_auto_target = target_time
 
 with tab2:
     st.markdown("### Model Performance Analytics")
@@ -520,3 +573,38 @@ with tab2:
 
     else:
         st.info("No predictions found in the Google Sheet yet. Run a prediction to start tracking!")
+
+with tab3:
+    st.markdown("### 🎯 Polymarket Odds")
+    st.markdown("Compare AI predictions against live Polymarket market odds for BTC 5-minute windows.")
+
+    polymarket_url = get_polymarket_url()
+
+    col_pred, col_iframe = st.columns([1, 2])
+
+    with col_pred:
+        st.markdown("#### Last AI Prediction")
+        last_pred_history, _ = load_history_from_sheets()
+        if not last_pred_history.empty:
+            last = last_pred_history.iloc[-1]
+            direction_icon = "⬆️" if last.get("Prediction") == "UP" else "⬇️"
+            st.metric("Direction", f"{direction_icon} {last.get('Prediction', 'N/A')}")
+            st.metric("AI Confidence", f"{last.get('Confidence', 'N/A')}%")
+            target_display = fmt_et(last.get("Target_Time"), "%H:%M %Z") or str(last.get("Target_Time", "N/A"))
+            st.metric("Target Window", target_display)
+            outcome = last.get("Outcome", "Pending")
+            outcome_color = "green" if outcome == "Win" else "red" if outcome == "Loss" else "orange"
+            st.markdown(f"**Outcome:** :{outcome_color}[{outcome}]")
+        else:
+            st.info("No predictions logged yet.")
+
+    with col_iframe:
+        if polymarket_url:
+            st.markdown("#### Live Polymarket Market")
+            components.iframe(polymarket_url, height=600, scrolling=True)
+        else:
+            st.warning(
+                "Polymarket URL not configured. "
+                "Add the following to your `.streamlit/secrets.toml`:\n\n"
+                "```toml\n[polymarket]\nurl = \"https://polymarket.com/event/YOUR_MARKET_URL\"\n```"
+            )
