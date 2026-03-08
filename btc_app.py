@@ -7,7 +7,7 @@ import joblib
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
@@ -61,6 +61,42 @@ def get_polymarket_url():
     """Return the Polymarket market URL from secrets, or a placeholder if not configured."""
     try:
         return st.secrets["polymarket"]["url"]
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=30)
+def fetch_polymarket_odds(target_time):
+    """Fetch UP/DOWN prices for the Polymarket 5-min BTC window closing at target_time.
+    Returns {"up": float, "down": float, "slug": str} or None on failure.
+    """
+    import requests as _requests
+    ts = int(target_time.replace(tzinfo=timezone.utc).timestamp())
+    slug = f"btc-updown-5m-{ts}"
+    try:
+        resp = _requests.get(
+            f"https://gamma-api.polymarket.com/markets?slug={slug}",
+            timeout=5,
+        )
+        data = resp.json()
+        if not data:
+            return None
+        market = data[0] if isinstance(data, list) else data
+        outcomes = market.get("outcomes", [])
+        prices = market.get("outcomePrices", [])
+        if len(outcomes) < 2 or len(prices) < 2:
+            return None
+        result = {}
+        for outcome, price in zip(outcomes, prices):
+            key = outcome.strip().lower()
+            if "up" in key:
+                result["up"] = float(price)
+            elif "down" in key:
+                result["down"] = float(price)
+        if "up" not in result or "down" not in result:
+            return None
+        result["slug"] = slug
+        return result
     except Exception:
         return None
 
@@ -184,6 +220,11 @@ def load_history_from_sheets():
         df = pd.DataFrame(records)
         df["Prediction_Time"] = pd.to_datetime(df["Prediction_Time"])
         df["Target_Time"] = pd.to_datetime(df["Target_Time"])
+        # Gracefully handle sheets that predate the Polymarket_Odds column
+        if "Polymarket_Odds" not in df.columns:
+            df["Polymarket_Odds"] = np.nan
+        else:
+            df["Polymarket_Odds"] = pd.to_numeric(df["Polymarket_Odds"], errors="coerce")
         return df, sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
@@ -321,7 +362,12 @@ def live_market_and_advanced_stats_fragment(
 
 
 # --- 7. UI Layout (Tabs) ---
-tab1, tab2, tab3 = st.tabs(["🔮 Live Predictor", "📊 Analytics & 24h Visualizer", "🎯 Polymarket Odds"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔮 Live Predictor",
+    "📊 Analytics & 24h Visualizer",
+    "🎯 Polymarket Odds",
+    "💰 P&L Simulator",
+])
 
 with tab1:
     st.markdown("### Generate Next Move")
@@ -355,6 +401,9 @@ with tab1:
 
             target_time = snap_to_polymarket_window(current_time)
 
+            # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
+            pm_odds = fetch_polymarket_odds(target_time)
+
             if not history_df.empty and (history_df["Target_Time"] == target_time).any():
                 st.warning(
                     f"Prediction already generated for window {fmt_et(target_time, '%H:%M %Z')}. "
@@ -387,16 +436,35 @@ with tab1:
 
                 st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
 
+                # Polymarket odds row
+                if pm_odds:
+                    st.markdown("**Polymarket Implied Odds (current window):**")
+                    pm_col_up, pm_col_down = st.columns(2)
+                    pm_col_up.metric(
+                        "Polymarket UP",
+                        f"{pm_odds['up'] * 100:.1f}%",
+                        delta=f"Payout {1 / pm_odds['up']:.2f}x",
+                    )
+                    pm_col_down.metric(
+                        "Polymarket DOWN",
+                        f"{pm_odds['down'] * 100:.1f}%",
+                        delta=f"Payout {1 / pm_odds['down']:.2f}x",
+                    )
+                else:
+                    st.caption("Polymarket odds unavailable for this window.")
+
                 if sheet:
-                    # Keep logging in UTC-naive (same as before) so existing sheet data & grading remain consistent.
+                    # Odds for the predicted direction (stored as col 8 for P&L calc)
+                    odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
                     new_row = [
                         str(current_time),
                         current_price,
                         direction,
                         round(confidence_pct, 2),
                         str(target_time),
-                        "",
-                        "Pending",
+                        "",          # Close_Price (filled by resolver)
+                        "Pending",   # Outcome (filled by resolver)
+                        odds_val,    # Polymarket_Odds
                     ]
                     sheet.append_row(new_row)
                     st.success("✅ Prediction successfully logged to Google Sheets!")
@@ -565,6 +633,10 @@ with tab2:
             history_display["Prediction_Time"] = history_display["Prediction_Time"].apply(lambda x: fmt_et(x, "%Y-%m-%d %H:%M %Z"))
         if "Target_Time" in history_display.columns:
             history_display["Target_Time"] = history_display["Target_Time"].apply(lambda x: fmt_et(x, "%Y-%m-%d %H:%M %Z"))
+        if "Polymarket_Odds" in history_display.columns:
+            history_display["Polymarket_Odds"] = history_display["Polymarket_Odds"].apply(
+                lambda x: f"{x:.4f} ({x*100:.1f}%)" if pd.notna(x) and x > 0 else ""
+            )
 
         st.dataframe(
             history_display.iloc[::-1].style.map(highlight_outcome, subset=["Outcome"]),
@@ -575,12 +647,10 @@ with tab2:
         st.info("No predictions found in the Google Sheet yet. Run a prediction to start tracking!")
 
 with tab3:
-    st.markdown("### 🎯 Polymarket Odds")
-    st.markdown("Compare AI predictions against live Polymarket market odds for BTC 5-minute windows.")
+    st.markdown("### 🎯 Polymarket Live Odds")
+    st.markdown("Live market odds fetched via the Polymarket API for the current 5-minute BTC window.")
 
-    polymarket_url = get_polymarket_url()
-
-    col_pred, col_iframe = st.columns([1, 2])
+    col_pred, col_odds = st.columns([1, 2])
 
     with col_pred:
         st.markdown("#### Last AI Prediction")
@@ -595,16 +665,187 @@ with tab3:
             outcome = last.get("Outcome", "Pending")
             outcome_color = "green" if outcome == "Win" else "red" if outcome == "Loss" else "orange"
             st.markdown(f"**Outcome:** :{outcome_color}[{outcome}]")
+            last_odds = last.get("Polymarket_Odds")
+            if pd.notna(last_odds) and float(last_odds) > 0:
+                st.metric("Odds at Prediction", f"{float(last_odds)*100:.1f}%",
+                          delta=f"Payout {1/float(last_odds):.2f}x")
         else:
             st.info("No predictions logged yet.")
 
-    with col_iframe:
-        if polymarket_url:
-            st.markdown("#### Live Polymarket Market")
-            components.iframe(polymarket_url, height=600, scrolling=True)
+    with col_odds:
+        st.markdown("#### Live Odds — Current Window")
+        current_window_target = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
+        live_odds = fetch_polymarket_odds(current_window_target)
+
+        if live_odds:
+            odds_col_up, odds_col_down = st.columns(2)
+            odds_col_up.metric(
+                "UP probability",
+                f"{live_odds['up'] * 100:.1f}%",
+                delta=f"Implied payout {1 / live_odds['up']:.2f}x",
+            )
+            odds_col_down.metric(
+                "DOWN probability",
+                f"{live_odds['down'] * 100:.1f}%",
+                delta=f"Implied payout {1 / live_odds['down']:.2f}x",
+            )
+            st.caption(
+                f"Market: `{live_odds['slug']}` · Window closes at "
+                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 30s"
+            )
         else:
             st.warning(
-                "Polymarket URL not configured. "
-                "Add the following to your `.streamlit/secrets.toml`:\n\n"
-                "```toml\n[polymarket]\nurl = \"https://polymarket.com/event/YOUR_MARKET_URL\"\n```"
+                "Could not fetch live odds from Polymarket. "
+                "The market for this window may not be open yet, or the API is temporarily unavailable."
             )
+
+        polymarket_url = get_polymarket_url()
+        if polymarket_url and not polymarket_url.startswith("https://polymarket.com/event/PLACEHOLDER"):
+            st.link_button("Open on Polymarket ↗", polymarket_url)
+
+with tab4:
+    st.markdown("### 💰 P&L Simulator")
+    st.markdown(
+        "Simulates portfolio growth starting from **$1,000** using your logged predictions, "
+        "Polymarket odds at bet time, and actual outcomes. "
+        "Standard bets are **2.5%** of current balance; predictions with ≥60% confidence use **5%**."
+    )
+
+    # Load history (may already be loaded in tab2 context, but tabs are independent blocks)
+    sim_history, _ = load_history_from_sheets()
+
+    if sim_history.empty:
+        st.info("No predictions found in the Google Sheet yet. Run predictions to start tracking!")
+    else:
+        completed_trades_sim = sim_history[sim_history["Outcome"].isin(["Win", "Loss"])].copy()
+
+        # Only trades that have valid Polymarket odds recorded
+        completed_with_odds = completed_trades_sim[
+            completed_trades_sim["Polymarket_Odds"].notna()
+            & (completed_trades_sim["Polymarket_Odds"] > 0)
+        ].sort_values("Prediction_Time").reset_index(drop=True)
+
+        excluded_count = len(completed_trades_sim) - len(completed_with_odds)
+
+        if completed_with_odds.empty:
+            st.info(
+                "No completed predictions with Polymarket odds yet. "
+                "Odds are recorded starting from the next prediction you generate."
+            )
+            if excluded_count > 0:
+                st.caption(
+                    f"{excluded_count} historical prediction(s) excluded — "
+                    "Polymarket odds were not recorded at that time."
+                )
+        else:
+            # --- Simulation constants ---
+            STARTING_BALANCE = 1000.0
+            STANDARD_BET_PCT = 0.025
+            HIGH_CONF_BET_PCT = 0.05
+            HIGH_CONF_THRESHOLD = 60.0
+
+            balance = STARTING_BALANCE
+            trades_log = []
+
+            for _, row in completed_with_odds.iterrows():
+                conf = float(row["Confidence"])
+                odds = float(row["Polymarket_Odds"])
+                bet_pct = HIGH_CONF_BET_PCT if conf >= HIGH_CONF_THRESHOLD else STANDARD_BET_PCT
+                bet_amount = balance * bet_pct
+
+                if row["Outcome"] == "Win":
+                    profit = bet_amount * (1.0 / odds - 1.0)
+                    balance += profit
+                    pnl = profit
+                else:
+                    balance -= bet_amount
+                    pnl = -bet_amount
+
+                trades_log.append({
+                    "Time": fmt_et(row["Prediction_Time"], "%m/%d %H:%M %Z"),
+                    "Direction": row["Prediction"],
+                    "Confidence": f"{conf:.1f}%",
+                    "Odds": f"{odds:.3f} ({odds*100:.1f}%)",
+                    "Bet %": f"{bet_pct*100:.1f}%",
+                    "Bet $": round(bet_amount, 2),
+                    "Outcome": row["Outcome"],
+                    "P&L": round(pnl, 2),
+                    "Balance": round(balance, 2),
+                })
+
+            total_pnl = balance - STARTING_BALANCE
+            roi_pct = (total_pnl / STARTING_BALANCE) * 100
+
+            # --- KPI row ---
+            st.divider()
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric("Starting Balance", "$1,000.00")
+            kpi2.metric(
+                "Current Balance",
+                f"${balance:,.2f}",
+                delta=f"${total_pnl:+,.2f}",
+                delta_color="normal",
+            )
+            kpi3.metric("Total P&L", f"${total_pnl:+,.2f}")
+            kpi4.metric("ROI", f"{roi_pct:+.2f}%")
+            st.divider()
+
+            # --- Balance-over-time chart ---
+            sim_df = pd.DataFrame(trades_log)
+            sim_df.index.name = "Trade #"
+
+            fig_bal = go.Figure()
+            fig_bal.add_trace(go.Scatter(
+                x=list(range(len(sim_df))),
+                y=sim_df["Balance"],
+                mode="lines+markers",
+                line=dict(color="#00d084", width=2),
+                marker=dict(
+                    color=["green" if p >= 0 else "red" for p in sim_df["P&L"]],
+                    size=8,
+                ),
+                hovertext=[
+                    f"Trade {i+1}: {row['Direction']} | {row['Outcome']} | "
+                    f"P&L: ${row['P&L']:+.2f} | Balance: ${row['Balance']:,.2f}"
+                    for i, row in sim_df.iterrows()
+                ],
+                hoverinfo="text",
+                name="Balance",
+            ))
+            fig_bal.add_hline(
+                y=STARTING_BALANCE,
+                line_dash="dot",
+                line_color="gray",
+                annotation_text="Starting $1,000",
+                annotation_position="bottom right",
+            )
+            fig_bal.update_layout(
+                title="Portfolio Balance Over Trades",
+                xaxis_title="Trade #",
+                yaxis_title="Balance ($)",
+                template="plotly_dark",
+                height=400,
+                showlegend=False,
+            )
+            st.plotly_chart(fig_bal, use_container_width=True)
+
+            # --- Trades table ---
+            st.markdown("#### Trade Log")
+
+            def highlight_sim_outcome(val):
+                if val == "Win":
+                    return "background-color: rgba(0, 255, 0, 0.15)"
+                elif val == "Loss":
+                    return "background-color: rgba(255, 0, 0, 0.15)"
+                return ""
+
+            st.dataframe(
+                sim_df.style.map(highlight_sim_outcome, subset=["Outcome"]),
+                use_container_width=True,
+            )
+
+            if excluded_count > 0:
+                st.info(
+                    f"Note: {excluded_count} completed prediction(s) excluded from simulation "
+                    "— Polymarket odds were not recorded at prediction time (pre-dates this feature)."
+                )
