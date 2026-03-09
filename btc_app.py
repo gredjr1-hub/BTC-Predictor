@@ -302,8 +302,12 @@ def load_history_from_sheets():
             return pd.DataFrame(), sheet
 
         df = pd.DataFrame(records)
-        df["Prediction_Time"] = pd.to_datetime(df["Prediction_Time"])
-        df["Target_Time"] = pd.to_datetime(df["Target_Time"])
+        df["Prediction_Time"] = pd.to_datetime(df["Prediction_Time"], errors='coerce')
+        df["Target_Time"] = pd.to_datetime(df["Target_Time"], errors='coerce')
+        # Silently discard any rows with unparseable timestamps (corrupted sheet cells)
+        bad_rows = df["Prediction_Time"].isna().sum()
+        if bad_rows:
+            df.dropna(subset=["Prediction_Time"], inplace=True)
         # Gracefully handle sheets that predate the Polymarket_Odds column
         if "Polymarket_Odds" not in df.columns:
             df["Polymarket_Odds"] = np.nan
@@ -531,6 +535,8 @@ with tab1:
             current_state = live_data.iloc[-1:]
             current_price = float(current_state["Close"].values[0])
             current_time = current_state.index[0]  # UTC-naive candle timestamp
+            _live_price = get_live_ticker_price()
+            entry_price = _live_price if _live_price else current_price
 
             target_time = snap_to_polymarket_window(current_time)
 
@@ -657,7 +663,7 @@ with tab1:
                         strike_val = round(pm_odds["price_to_beat"], 2) if pm_odds and pm_odds.get("price_to_beat") else ""
                         new_row = [
                             str(current_time),           # Col 1: Prediction_Time
-                            current_price,               # Col 2: Entry_Price
+                            entry_price,                 # Col 2: Entry_Price
                             window_start_price,          # Col 3: Window_Start_Price
                             direction,                   # Col 4: Prediction
                             round(confidence_pct, 2),    # Col 5: Confidence
