@@ -480,14 +480,21 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                 close_price = float(valid_candles["Close"].iloc[0])
 
             # Reference price: PM strike > window start > entry
-            ref_price_raw = (
-                row.get("PM_Strike_Price")
-                or row.get("Window_Start_Price")
-                or row.get("Entry_Price")
-            )
-            ref_price = float(ref_price_raw) if ref_price_raw and pd.notna(ref_price_raw) else None
+            # Use explicit NaN-safe fallback — Python `or` doesn't skip NaN (NaN is truthy)
+            def _first_valid_price(*cols):
+                for c in cols:
+                    v = row.get(c)
+                    try:
+                        f = float(v)
+                        if pd.notna(f) and f > 0:
+                            return f
+                    except (TypeError, ValueError):
+                        pass
+                return None
 
-            if ref_price is None or ref_price == 0:
+            ref_price = _first_valid_price("PM_Strike_Price", "Window_Start_Price", "Entry_Price")
+
+            if ref_price is None:
                 continue
 
             outcome = (
