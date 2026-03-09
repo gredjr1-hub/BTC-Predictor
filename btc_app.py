@@ -824,7 +824,13 @@ with tab1:
                 else:
                     if sheet:
                         odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
-                        strike_val = round(pm_odds["price_to_beat"], 2) if pm_odds and pm_odds.get("price_to_beat") else ""
+                        # price_to_beat from Gamma API is rarely populated for BTC 5m markets;
+                        # window_start_price (Pyth at window open) is the actual Polymarket strike price.
+                        strike_val = (
+                            round(pm_odds["price_to_beat"], 2)
+                            if pm_odds and pm_odds.get("price_to_beat")
+                            else round(window_start_price, 2) if window_start_price else ""
+                        )
                         _pred_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                         new_row = [
                             _pred_timestamp,             # Col 1:  Prediction_Time (second-precision UTC)
