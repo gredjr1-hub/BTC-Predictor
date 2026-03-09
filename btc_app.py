@@ -174,6 +174,39 @@ def fetch_polymarket_odds(target_time):
         return None
 
 
+def fetch_polymarket_resolution(target_time) -> str | None:
+    """
+    Query Gamma API for a resolved 5-minute BTC window.
+    target_time: the window close time (UTC-naive datetime).
+    Returns 'UP', 'DOWN', or None (unresolved / not found).
+    """
+    try:
+        import requests as _r
+        import json as _json
+        window_open = target_time - timedelta(minutes=5)
+        ts = int(window_open.replace(tzinfo=timezone.utc).timestamp())
+        slug = f"btc-updown-5m-{ts}"
+        r = _r.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None
+        event = data[0] if isinstance(data, list) else data
+        markets = event.get("markets", [])
+        for mkt in markets:
+            if mkt.get("resolved"):
+                raw_outcomes = mkt.get("outcomes", "[]")
+                raw_prices = mkt.get("outcomePrices", "[]")
+                outcomes = _json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+                prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                for outcome, price in zip(outcomes, prices):
+                    if float(price) >= 0.99:
+                        return str(outcome).strip().upper()  # "UP" or "DOWN"
+        return None
+    except Exception:
+        return None
+
+
 def snap_to_polymarket_window(dt):
     """Snap a UTC-naive datetime forward to the next :00/:05/:10... boundary.
     If dt is already on a boundary, returns the NEXT boundary (next window close semantics).
@@ -263,8 +296,55 @@ def get_24h_chart_data():
     return df
 
 
+PYTH_BTC_URL = (
+    "https://hermes.pyth.network/v2/updates/price/latest"
+    "?ids[]=0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+)
+
+
+def get_polymarket_btc_price() -> float | None:
+    """Fetch live BTC/USD from Pyth (Polymarket's oracle). Returns None on failure."""
+    try:
+        import requests as _r
+        r = _r.get(PYTH_BTC_URL, timeout=5)
+        r.raise_for_status()
+        parsed = r.json()["parsed"][0]["price"]
+        price = float(parsed["price"]) * 10 ** int(parsed["expo"])
+        return round(price, 2)
+    except Exception:
+        return None
+
+
+PYTH_BTC_FEED_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+
+def fetch_pyth_price_at(target_time) -> float | None:
+    """
+    Fetch the Pyth oracle BTC/USD price at a specific historical UTC timestamp.
+    Uses Hermes v2 publish_time endpoint — returns the price update at or just
+    before target_time, which is the same source Polymarket uses to settle.
+    target_time: UTC-naive datetime.
+    """
+    try:
+        import requests as _r
+        ts = int(target_time.replace(tzinfo=timezone.utc).timestamp())
+        url = (
+            f"https://hermes.pyth.network/v2/updates/price/{ts}"
+            f"?ids[]={PYTH_BTC_FEED_ID}"
+        )
+        r = _r.get(url, timeout=8)
+        r.raise_for_status()
+        parsed = r.json()["parsed"][0]["price"]
+        price = float(parsed["price"]) * 10 ** int(parsed["expo"])
+        return round(price, 2)
+    except Exception:
+        return None
+
+
 def get_live_ticker_price():
-    """Fetch live BTC/USDT price (Kraken). Returns None if fetch fails."""
+    """Fetch live BTC/USD — Pyth oracle first (Polymarket source), Kraken fallback."""
+    price = get_polymarket_btc_price()
+    if price:
+        return price
     try:
         exchange = get_exchange()
         ticker = exchange.fetch_ticker("BTC/USDT")
@@ -318,6 +398,13 @@ def load_history_from_sheets():
             df["Window_Start_Price"] = np.nan
         else:
             df["Window_Start_Price"] = pd.to_numeric(df["Window_Start_Price"], errors="coerce")
+        # Gracefully handle sheets that predate the Seconds_Left / Model columns
+        if "Seconds_Left" not in df.columns:
+            df["Seconds_Left"] = np.nan
+        else:
+            df["Seconds_Left"] = pd.to_numeric(df["Seconds_Left"], errors="coerce")
+        if "Model" not in df.columns:
+            df["Model"] = np.nan
         return df, sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
@@ -329,39 +416,62 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
         return history_df
 
     pending_mask = history_df["Outcome"] == "Pending"
-    latest_live_time = live_data.index[-1]
 
     for idx, row in history_df[pending_mask].iterrows():
         target_time = row["Target_Time"]
+        if pd.isna(target_time):
+            continue
 
-        if target_time <= latest_live_time:
-            valid_candles = live_data[live_data.index >= target_time]
+        # Only attempt resolution once the window has closed (add 30s grace for Polymarket to settle)
+        if target_time > datetime.utcnow() - timedelta(seconds=30):
+            continue
 
-            if not valid_candles.empty:
-                actual_close = valid_candles["Close"].iloc[0]
-                prediction = row["Prediction"]
+        prediction = row["Prediction"]
+        outcome = None
+        close_price = None
 
-                # Use window start price if available; fall back to entry price for legacy rows
-                ref_price_raw = row.get("Window_Start_Price")
-                ref_price = (
-                    float(ref_price_raw)
-                    if pd.notna(ref_price_raw) and float(ref_price_raw) > 0
-                    else float(row["Entry_Price"])
-                )
+        # --- Primary: Polymarket Gamma API (authoritative resolution) ---
+        pm_resolved = fetch_polymarket_resolution(target_time)
+        if pm_resolved in ("UP", "DOWN"):
+            outcome = "Win" if pm_resolved == prediction else "Loss"
+            # Use Pyth price at boundary as the recorded close price (best available)
+            pyth_price = fetch_pyth_price_at(target_time)
+            close_price = pyth_price if pyth_price else None
 
-                outcome = (
-                    "Win"
-                    if (prediction == "UP" and actual_close > ref_price)
-                    or (prediction == "DOWN" and actual_close < ref_price)
-                    else "Loss"
-                )
+        # --- Fallback: Pyth price comparison (Polymarket not yet resolved) ---
+        if outcome is None:
+            close_price = fetch_pyth_price_at(target_time)
 
-                history_df.at[idx, "Close_Price"] = round(actual_close, 2)
-                history_df.at[idx, "Outcome"] = outcome
+            if close_price is None:
+                # Last resort: Kraken candle at or after target
+                valid_candles = live_data[live_data.index >= target_time]
+                if valid_candles.empty:
+                    continue   # can't resolve yet — leave Pending
+                close_price = float(valid_candles["Close"].iloc[0])
 
-                sheet.update_cell(idx + 2, 7, round(actual_close, 2))   # col G = Close_Price
-                sheet.update_cell(idx + 2, 8, outcome)                   # col H = Outcome
-                _fetch_sheet_records.clear()   # invalidate cache after resolver writes outcomes
+            # Reference price: PM strike > window start > entry
+            ref_price_raw = (
+                row.get("PM_Strike_Price")
+                or row.get("Window_Start_Price")
+                or row.get("Entry_Price")
+            )
+            ref_price = float(ref_price_raw) if ref_price_raw and pd.notna(ref_price_raw) else None
+
+            if ref_price is None or ref_price == 0:
+                continue
+
+            outcome = (
+                "Win"
+                if (prediction == "UP" and close_price > ref_price)
+                or (prediction == "DOWN" and close_price < ref_price)
+                else "Loss"
+            )
+
+        history_df.at[idx, "Close_Price"] = round(close_price, 2) if close_price else ""
+        history_df.at[idx, "Outcome"] = outcome
+        sheet.update_cell(idx + 2, 7, round(close_price, 2) if close_price else "")  # col G
+        sheet.update_cell(idx + 2, 8, outcome)                                         # col H
+        _fetch_sheet_records.clear()
 
     return history_df
 
@@ -538,17 +648,23 @@ with tab1:
             _live_price = get_live_ticker_price()
             entry_price = _live_price if _live_price else current_price
 
-            target_time = snap_to_polymarket_window(current_time)
+            # Use wall-clock time for target_time — candle timestamp lags by up to 1 candle
+            # at the boundary (last candle = 14:45 when we're actually at 14:50).
+            target_time = snap_to_polymarket_window(datetime.utcnow())
 
             # Window start = 5 minutes before target_time
             window_start_time = target_time - timedelta(minutes=5)
 
-            # Look up start-of-window price from live_data (already fetched)
-            window_start_candles = live_data[live_data.index == window_start_time]
-            if not window_start_candles.empty:
-                window_start_price = float(window_start_candles["Close"].values[0])
-            else:
-                window_start_price = current_price
+            # Pyth oracle price at window open (same source Polymarket uses)
+            window_start_price = fetch_pyth_price_at(window_start_time)
+            if window_start_price is None:
+                # Fall back to Kraken candle at window open, then current price
+                window_start_candles = live_data[live_data.index == window_start_time]
+                window_start_price = (
+                    float(window_start_candles["Close"].values[0])
+                    if not window_start_candles.empty
+                    else current_price
+                )
 
             # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
             fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
@@ -579,9 +695,16 @@ with tab1:
                         )
                     st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
 
-                # Select the horizon-specific model based on minutes remaining in this window
-                _now_minute = current_time.minute % 5
-                _minutes_to_end = max(1, 5 - int(_now_minute))  # 5 at :00/:05, 1 at :04/:09...
+                # Seconds-precise model selection
+                _now = datetime.utcnow()
+                _seconds_left = max(0, int((target_time - _now).total_seconds()))
+
+                if _seconds_left < 90:          # < 1.5 min → use 1-min model
+                    _minutes_to_end = 1
+                else:
+                    _now_minute = current_time.minute % 5
+                    _minutes_to_end = max(1, 5 - int(_now_minute))
+
                 horizon_model = model[_minutes_to_end]
 
                 # Build the 9-feature input for the selected model
@@ -626,8 +749,6 @@ with tab1:
                 st.markdown(f"**Signal Strength:** :{color}[{signal_strength}] &nbsp; `{_minutes_to_end}-min model`")
 
                 # Window countdown
-                _now = datetime.utcnow()
-                _seconds_left = max(0, int((target_time - _now).total_seconds()))
                 _mins, _secs = divmod(_seconds_left, 60)
                 _countdown_color = "green" if _seconds_left > 180 else "orange" if _seconds_left > 60 else "red"
                 st.markdown(f"**⏱️ Window closes in:** :{_countdown_color}[{_mins}m {_secs:02d}s]")
@@ -649,7 +770,7 @@ with tab1:
                 else:
                     st.caption("Polymarket odds unavailable for this window.")
 
-                _window_secs_left = max(0, int((target_time - datetime.utcnow()).total_seconds()))
+                _window_secs_left = _seconds_left   # already computed above
 
                 if auto_trigger and pm_odds is None and _window_secs_left > 45:
                     st.warning(
@@ -657,21 +778,30 @@ with tab1:
                         f"Window closes in {_window_secs_left}s."
                     )
                     # Don't set last_auto_target → allows retry on next rerun
+                elif _window_secs_left < 60:
+                    st.error(
+                        "⛔ Window closes in under 1 minute — prediction blocked. "
+                        "Wait for the next window to open."
+                    )
+                    st.session_state.last_auto_target = target_time   # prevent auto-retry spam
                 else:
                     if sheet:
                         odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
                         strike_val = round(pm_odds["price_to_beat"], 2) if pm_odds and pm_odds.get("price_to_beat") else ""
+                        _pred_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                         new_row = [
-                            str(current_time),           # Col 1: Prediction_Time
-                            entry_price,                 # Col 2: Entry_Price
-                            window_start_price,          # Col 3: Window_Start_Price
-                            direction,                   # Col 4: Prediction
-                            round(confidence_pct, 2),    # Col 5: Confidence
-                            str(target_time),            # Col 6: Target_Time
-                            "",                          # Col 7: Close_Price (resolver)
-                            "Pending",                   # Col 8: Outcome (resolver)
-                            odds_val,                    # Col 9: Polymarket_Odds
+                            _pred_timestamp,             # Col 1:  Prediction_Time (second-precision UTC)
+                            entry_price,                 # Col 2:  Entry_Price
+                            window_start_price,          # Col 3:  Window_Start_Price
+                            direction,                   # Col 4:  Prediction
+                            round(confidence_pct, 2),    # Col 5:  Confidence
+                            str(target_time),            # Col 6:  Target_Time
+                            "",                          # Col 7:  Close_Price (resolver)
+                            "Pending",                   # Col 8:  Outcome (resolver)
+                            odds_val,                    # Col 9:  Polymarket_Odds
                             strike_val,                  # Col 10: PM_Strike_Price
+                            _seconds_left,               # Col 11: Seconds_Left
+                            f"{_minutes_to_end}min",     # Col 12: Model
                         ]
                         sheet.append_row(new_row)
                         _fetch_sheet_records.clear()   # invalidate read cache so other tabs see new row
@@ -696,6 +826,21 @@ with tab2:
     )
     if _exclude_pre_odds and not history.empty and "Polymarket_Odds" in history.columns:
         history = history[history["Polymarket_Odds"].notna() & (history["Polymarket_Odds"] > 0)]
+
+    _available_models = (
+        ["All"] + sorted(history["Model"].dropna().unique().tolist())
+        if "Model" in history.columns and not history.empty
+        else ["All"]
+    )
+    _model_filter = st.selectbox(
+        "Filter by model horizon",
+        options=_available_models,
+        index=0,
+        help="Restrict all stats and charts to a specific model horizon (e.g. '3min'). "
+             "Select 'All' to see combined stats.",
+    )
+    if _model_filter != "All" and "Model" in history.columns:
+        history = history[history["Model"] == _model_filter]
 
     if not history.empty:
         completed_trades = history[history["Outcome"].isin(["Win", "Loss"])]
@@ -837,6 +982,31 @@ with tab2:
             avg_conf_win=avg_conf_win,
             avg_conf_loss=avg_conf_loss,
         )
+
+        # --- Per-Model Breakdown ---
+        if "Model" in history.columns and history["Model"].notna().any():
+            st.markdown("#### Per-Model Breakdown")
+            _model_rows = []
+            for _m in ["1min", "2min", "3min", "4min", "5min"]:
+                _m_trades = completed_trades[completed_trades["Model"] == _m]
+                _m_total = len(_m_trades)
+                if _m_total == 0:
+                    continue
+                _m_wins = len(_m_trades[_m_trades["Outcome"] == "Win"])
+                _m_wr = _m_wins / _m_total * 100
+                _m_avg_conf = _m_trades["Confidence"].mean() if "Confidence" in _m_trades.columns else None
+                _model_rows.append({
+                    "Model": _m,
+                    "Trades": _m_total,
+                    "Wins": _m_wins,
+                    "Win Rate": f"{_m_wr:.1f}%",
+                    "Avg Confidence": f"{_m_avg_conf:.1f}%" if _m_avg_conf else "—",
+                })
+            if _model_rows:
+                st.dataframe(pd.DataFrame(_model_rows), hide_index=True, use_container_width=True)
+            else:
+                st.caption("No model data yet — Model column added to new predictions going forward.")
+            st.divider()
 
         # --- The Data Table ---
         st.markdown("#### Cloud Tracker Log (Times shown in Eastern Time)")
@@ -1022,6 +1192,29 @@ with tab4:
         help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
              "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
     )
+    _pl_col1, _pl_col2 = st.columns(2)
+    with _pl_col1:
+        _pl_available_models = (
+            ["All"] + sorted(sim_history["Model"].dropna().unique().tolist())
+            if "Model" in sim_history.columns and not sim_history.empty
+            else ["All"]
+        )
+        _pl_model_filter = st.selectbox(
+            "Filter by model horizon",
+            options=_pl_available_models,
+            index=0,
+            help="Only include trades that used a specific model horizon. "
+                 "Useful for excluding late-window 1-min or 2-min predictions.",
+        )
+    with _pl_col2:
+        _pl_min_conf = st.number_input(
+            "Min Confidence (%)",
+            min_value=50.0,
+            max_value=100.0,
+            value=50.0,
+            step=1.0,
+            help="Exclude trades where AI confidence was below this threshold.",
+        )
 
     if sim_history.empty:
         st.info("No predictions found in the Google Sheet yet. Run predictions to start tracking!")
@@ -1033,6 +1226,14 @@ with tab4:
             completed_trades_sim["Polymarket_Odds"].notna()
             & (completed_trades_sim["Polymarket_Odds"] > 0)
         ].sort_values("Prediction_Time").reset_index(drop=True)
+
+        # Apply model and confidence filters
+        if _pl_model_filter != "All" and "Model" in completed_with_odds.columns:
+            completed_with_odds = completed_with_odds[completed_with_odds["Model"] == _pl_model_filter]
+        if _pl_min_conf > 50.0 and "Confidence" in completed_with_odds.columns:
+            completed_with_odds = completed_with_odds[
+                pd.to_numeric(completed_with_odds["Confidence"], errors="coerce") >= _pl_min_conf
+            ]
 
         excluded_count = len(completed_trades_sim) - len(completed_with_odds)
 
@@ -1083,6 +1284,7 @@ with tab4:
                             "P&L": 0,
                             "What-If P&L": hypothetical_pnl,
                             "Balance": round(balance, 2),
+                            "bet_amt": 0,
                         })
                         continue
                     bet_pct = MIN_BET_PCT   # even with high conf, don't oversize a small-payout bet
@@ -1118,8 +1320,10 @@ with tab4:
                     "P&L": round(pnl, 2),
                     "What-If P&L": "—",
                     "Balance": round(balance, 2),
+                    "bet_amt": round(bet_amount, 2),
                 })
 
+            trades_log_display = trades_log
             total_pnl = balance - STARTING_BALANCE
             roi_pct = (total_pnl / STARTING_BALANCE) * 100
 
@@ -1143,7 +1347,7 @@ with tab4:
             st.divider()
 
             # --- Balance-over-time chart ---
-            sim_df = pd.DataFrame(trades_log)
+            sim_df = pd.DataFrame(trades_log_display).drop(columns=["bet_amt"], errors="ignore")
             sim_df.index.name = "Trade #"
 
             fig_bal = go.Figure()
@@ -1200,10 +1404,10 @@ with tab4:
                 use_container_width=True,
             )
 
-            skipped_count = sum(1 for t in trades_log if "Skipped" in str(t.get("Outcome", "")))
+            skipped_count = sum(1 for t in trades_log_display if "Skipped" in str(t.get("Outcome", "")))
             if skipped_count:
-                would_win = sum(1 for t in trades_log if "would Win" in str(t.get("Outcome", "")))
-                would_loss = sum(1 for t in trades_log if "would Loss" in str(t.get("Outcome", "")))
+                would_win = sum(1 for t in trades_log_display if "would Win" in str(t.get("Outcome", "")))
+                would_loss = sum(1 for t in trades_log_display if "would Loss" in str(t.get("Outcome", "")))
                 st.caption(
                     f"{skipped_count} bet(s) skipped — high-odds market with insufficient AI confidence "
                     f"({would_win} would have Won, {would_loss} would have Lost)."
