@@ -392,7 +392,7 @@ def _fetch_sheet_records():
 _EXPECTED_HEADERS = [
     "Prediction_Time", "Entry_Price", "Window_Start_Price", "Prediction",
     "Confidence", "Target_Time", "Close_Price", "Outcome",
-    "Polymarket_Odds", "PM_Strike_Price", "Seconds_Left", "Model",
+    "Polymarket_Odds", "PM_Resolution", "Seconds_Left", "Model",
 ]
 
 def _ensure_sheet_headers(sheet):
@@ -425,15 +425,16 @@ def load_history_from_sheets():
 
         # Coerce all numeric columns — get_all_values() returns everything as strings
         for _col in ["Entry_Price", "Window_Start_Price", "Close_Price",
-                     "Confidence", "Polymarket_Odds", "PM_Strike_Price", "Seconds_Left"]:
+                     "Confidence", "Polymarket_Odds", "Seconds_Left"]:
             if _col in df.columns:
                 df[_col] = pd.to_numeric(df[_col], errors="coerce")
             else:
                 df[_col] = np.nan
 
-        # Gracefully handle sheets that predate the Model column
-        if "Model" not in df.columns:
-            df["Model"] = np.nan
+        # String columns — ensure they exist with a blank default
+        for _col in ["Model", "PM_Resolution"]:
+            if _col not in df.columns:
+                df[_col] = ""
 
         return df, sheet
     except Exception as e:
@@ -460,11 +461,13 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
         outcome = None
         close_price = None
 
+        pm_resolution = None
+
         # --- Primary: Polymarket Gamma API (authoritative resolution) ---
         pm_resolved = fetch_polymarket_resolution(target_time)
         if pm_resolved in ("UP", "DOWN"):
+            pm_resolution = pm_resolved
             outcome = "Win" if pm_resolved == prediction else "Loss"
-            # Use Pyth price at boundary as the recorded close price (best available)
             pyth_price = fetch_pyth_price_at(target_time)
             close_price = pyth_price if pyth_price else None
 
@@ -479,8 +482,7 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                     continue   # can't resolve yet — leave Pending
                 close_price = float(valid_candles["Close"].iloc[0])
 
-            # Reference price: PM strike > window start > entry
-            # Use explicit NaN-safe fallback — Python `or` doesn't skip NaN (NaN is truthy)
+            # NaN-safe reference price: window start > entry
             def _first_valid_price(*cols):
                 for c in cols:
                     v = row.get(c)
@@ -492,7 +494,7 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                         pass
                 return None
 
-            ref_price = _first_valid_price("PM_Strike_Price", "Window_Start_Price", "Entry_Price")
+            ref_price = _first_valid_price("Window_Start_Price", "Entry_Price")
 
             if ref_price is None:
                 continue
@@ -506,8 +508,12 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
 
         history_df.at[idx, "Close_Price"] = round(close_price, 2) if close_price else ""
         history_df.at[idx, "Outcome"] = outcome
-        sheet.update_cell(idx + 2, 7, round(close_price, 2) if close_price else "")  # col G
-        sheet.update_cell(idx + 2, 8, outcome)                                         # col H
+        if pm_resolution:
+            history_df.at[idx, "PM_Resolution"] = pm_resolution
+        sheet.update_cell(idx + 2, 7, round(close_price, 2) if close_price else "")  # col G = Close_Price
+        sheet.update_cell(idx + 2, 8, outcome)                                         # col H = Outcome
+        if pm_resolution:
+            sheet.update_cell(idx + 2, 10, pm_resolution)                              # col J = PM_Resolution
         _fetch_sheet_records.clear()
 
     return history_df
@@ -824,13 +830,6 @@ with tab1:
                 else:
                     if sheet:
                         odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
-                        # price_to_beat from Gamma API is rarely populated for BTC 5m markets;
-                        # window_start_price (Pyth at window open) is the actual Polymarket strike price.
-                        strike_val = (
-                            round(pm_odds["price_to_beat"], 2)
-                            if pm_odds and pm_odds.get("price_to_beat")
-                            else round(window_start_price, 2) if window_start_price else ""
-                        )
                         _pred_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                         new_row = [
                             _pred_timestamp,             # Col 1:  Prediction_Time (second-precision UTC)
@@ -842,7 +841,7 @@ with tab1:
                             "",                          # Col 7:  Close_Price (resolver)
                             "Pending",                   # Col 8:  Outcome (resolver)
                             odds_val,                    # Col 9:  Polymarket_Odds
-                            strike_val,                  # Col 10: PM_Strike_Price
+                            "",                          # Col 10: PM_Resolution (filled by resolver)
                             _seconds_left,               # Col 11: Seconds_Left
                             f"{_minutes_to_end}min",     # Col 12: Model
                         ]
