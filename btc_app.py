@@ -347,17 +347,24 @@ def live_market_and_advanced_stats_fragment(
                 st.markdown("**Active Open Bets:**")
                 for _, row in pending_trades.iterrows():
                     try:
-                        entry = float(row["Entry_Price"])
+                        ref_raw = row.get("Window_Start_Price")
+                        ref = (
+                            float(ref_raw)
+                            if pd.notna(ref_raw) and float(ref_raw) > 0
+                            else float(row["Entry_Price"])
+                        )
                     except Exception:
                         continue
 
                     direction = row.get("Prediction", "")
-                    diff = float(live_price) - entry if direction == "UP" else entry - float(live_price)
+                    diff = float(live_price) - ref if direction == "UP" else ref - float(live_price)
                     status_color = "green" if diff > 0 else "red"
-                    status_icon = "🟢 Profit" if diff > 0 else "🔴 Drawdown"
-                    st.markdown(
-                        f"- {direction} from **${entry:,.2f}** | :{status_color}[{status_icon} (${abs(diff):,.2f})]"
-                    )
+                    status_icon = "🟢 Profit" if diff > 0 else "🔴 Loss"
+                    target_str = fmt_et(row.get("Target_Time"), "%H:%M %Z") or "N/A"
+                    bc1, bc2, bc3 = st.columns([1, 2, 2])
+                    bc1.markdown(f"**{direction}**")
+                    bc2.markdown(f"Open @ **${ref:,.2f}** → closes {target_str}")
+                    bc3.markdown(f":{status_color}[{status_icon} (${abs(diff):,.2f})]")
             else:
                 st.markdown("*No active bets currently open.*")
         else:
@@ -524,6 +531,14 @@ with tab2:
     st.markdown("### Model Performance Analytics")
 
     history, _ = load_history_from_sheets()
+
+    _exclude_pre_odds = st.toggle(
+        "Exclude pre-Polymarket rows from stats & log",
+        value=True,
+        help="Hides rows recorded before Polymarket odds were tracked. Does not delete data from the sheet.",
+    )
+    if _exclude_pre_odds and not history.empty and "Polymarket_Odds" in history.columns:
+        history = history[history["Polymarket_Odds"].notna() & (history["Polymarket_Odds"] > 0)]
 
     if not history.empty:
         completed_trades = history[history["Outcome"].isin(["Win", "Loss"])]
@@ -769,6 +784,31 @@ with tab3:
         polymarket_url = get_polymarket_url()
         if polymarket_url and not polymarket_url.startswith("https://polymarket.com/event/PLACEHOLDER"):
             st.link_button("Open on Polymarket ↗", polymarket_url)
+
+        st.markdown("---")
+        st.markdown("#### 📈 Live BTC/USD Chart (5m)")
+        _tv_html = """
+<div class="tradingview-widget-container" style="height:420px">
+  <div id="tv_btc_chart" style="height:400px"></div>
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <script>
+  new TradingView.widget({
+    "container_id": "tv_btc_chart",
+    "autosize": true,
+    "symbol": "KRAKEN:XBTUSD",
+    "interval": "5",
+    "timezone": "America/New_York",
+    "theme": "dark",
+    "style": "1",
+    "locale": "en",
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "allow_symbol_change": false,
+    "save_image": false
+  });
+  </script>
+</div>"""
+        components.html(_tv_html, height=420)
 
 with tab4:
     st.markdown("### 💰 P&L Simulator")
