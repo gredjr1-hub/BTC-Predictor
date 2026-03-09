@@ -66,10 +66,11 @@ def get_polymarket_url():
         return None
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def fetch_polymarket_odds(target_time):
-    """Fetch UP/DOWN prices for the Polymarket 5-min BTC window opening 5 minutes before target_time.
-    Returns {"up": float, "down": float, "slug": str, "price_to_beat": float|None} or None on failure.
+    """Fetch real-time UP/DOWN buy prices from the Polymarket CLOB API.
+    Falls back to Gamma API outcomePrices if CLOB is unavailable.
+    Returns {"up": float, "down": float, "slug": str, "price_to_beat": float|None, "source": str} or None.
     """
     import json, re
     import requests as _requests
@@ -90,23 +91,33 @@ def fetch_polymarket_odds(target_time):
 
         result = {}
         price_to_beat = None
+        gamma_up = None
+        gamma_down = None
+        clob_token_map = {}  # outcome_key -> token_id
+
         for market in markets:
+            # Parse outcomes and gamma prices (fallback)
             raw_outcomes = market.get("outcomes", "[]")
             raw_prices = market.get("outcomePrices", "[]")
-            if isinstance(raw_outcomes, str):
-                outcomes = json.loads(raw_outcomes)
-                prices = json.loads(raw_prices)
-            else:
-                outcomes = raw_outcomes
-                prices = raw_prices
-            for outcome, price in zip(outcomes, prices):
-                key = str(outcome).strip().lower()
-                if "up" in key:
-                    result["up"] = float(price)
-                elif "down" in key:
-                    result["down"] = float(price)
+            raw_clob_ids = market.get("clobTokenIds", "[]")
 
-            # Extract price_to_beat: try direct API fields first, then parse market question
+            outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+            prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+            clob_ids = json.loads(raw_clob_ids) if isinstance(raw_clob_ids, str) else raw_clob_ids
+
+            for i, (outcome, price) in enumerate(zip(outcomes, prices)):
+                key = str(outcome).strip().lower()
+                token_id = clob_ids[i] if i < len(clob_ids) else None
+                if "up" in key:
+                    gamma_up = float(price)
+                    if token_id:
+                        clob_token_map["up"] = token_id
+                elif "down" in key:
+                    gamma_down = float(price)
+                    if token_id:
+                        clob_token_map["down"] = token_id
+
+            # Extract price_to_beat: direct field first, then regex on question
             if price_to_beat is None:
                 for field in ("startPrice", "startBTCPrice", "strikePrice"):
                     raw = market.get(field)
@@ -127,10 +138,37 @@ def fetch_polymarket_odds(target_time):
                     except Exception:
                         pass
 
-        if "up" not in result or "down" not in result:
+        if gamma_up is None or gamma_down is None:
             return None
+
+        # Attempt CLOB real-time prices (Buy price = ask = what Polymarket UI shows)
+        clob_source = False
+        if clob_token_map.get("up") and clob_token_map.get("down"):
+            try:
+                up_resp = _requests.get(
+                    f"https://clob.polymarket.com/price?token_id={clob_token_map['up']}&side=BUY",
+                    timeout=3,
+                )
+                down_resp = _requests.get(
+                    f"https://clob.polymarket.com/price?token_id={clob_token_map['down']}&side=BUY",
+                    timeout=3,
+                )
+                clob_up = float(up_resp.json().get("price", 0))
+                clob_down = float(down_resp.json().get("price", 0))
+                if 0 < clob_up < 1 and 0 < clob_down < 1:
+                    result["up"] = clob_up
+                    result["down"] = clob_down
+                    clob_source = True
+            except Exception:
+                pass  # fall through to gamma prices
+
+        if not clob_source:
+            result["up"] = gamma_up
+            result["down"] = gamma_down
+
         result["slug"] = slug
-        result["price_to_beat"] = price_to_beat  # None if not parseable from API
+        result["price_to_beat"] = price_to_beat
+        result["source"] = "clob" if clob_source else "gamma"
         return result
     except Exception:
         return None
@@ -165,8 +203,8 @@ if auto_pilot:
     # Full-app rerun every 5 minutes (kept for your existing "Live Sync" behavior)
     st_autorefresh(interval=300000, key="data_refresh")
     st.sidebar.success("Live Sync Active: Fetching latest data every 5 minutes.")
-# Always refresh every 60s so Polymarket odds stay current regardless of auto_pilot
-st_autorefresh(interval=60000, key="odds_refresh")
+# Refresh every 10s so CLOB odds stay near-real-time regardless of auto_pilot
+st_autorefresh(interval=10000, key="odds_refresh")
 if prediction_mode == "Auto" and not auto_pilot:
     st.sidebar.info("Auto mode requires Live Sync to be enabled.")
 
@@ -806,9 +844,10 @@ with tab3:
                 f"{live_odds['down'] * 100:.1f}%",
                 delta=f"Implied payout {1 / live_odds['down']:.2f}x",
             )
+            _src_label = "🟢 CLOB (real-time)" if live_odds.get("source") == "clob" else "🟡 Gamma (cached)"
             st.caption(
-                f"Market: `{live_odds['slug']}` · Window closes at "
-                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 60s · use button above for immediate refresh"
+                f"Market: `{live_odds['slug']}` · Source: {_src_label} · Window closes at "
+                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 10s · use button above for immediate refresh"
             )
         else:
             st.warning(
@@ -869,7 +908,7 @@ with tab3:
             )
             st.plotly_chart(fig, use_container_width=True)
         elif live_odds:
-            st.caption("Collecting readings… chart appears after the second tick (~60s).")
+            st.caption("Collecting readings… chart appears after the second tick (~10s).")
         else:
             st.caption("No odds data available for chart.")
 
