@@ -366,16 +366,51 @@ def get_gspread_client():
 
 @st.cache_data(ttl=120)
 def _fetch_sheet_records():
-    """Cached sheet read — 2-minute TTL to reduce Google Sheets API quota usage."""
+    """Cached sheet read — 2-minute TTL to reduce Google Sheets API quota usage.
+    Uses get_all_values() instead of get_all_records() to tolerate blank/duplicate header cells
+    that arise when new columns are appended without updating the header row first.
+    """
     client = get_gspread_client()
     sheet = client.open("BTC_AI_Tracker").sheet1
-    return sheet.get_all_records()
+    rows = sheet.get_all_values()
+    if not rows:
+        return []
+    headers = rows[0]
+    # Trim trailing empty headers; named columns always precede blanks
+    while headers and headers[-1] == "":
+        headers = headers[:-1]
+    records = []
+    for row in rows[1:]:
+        row = list(row)
+        # Pad short rows, trim extra columns beyond known headers
+        row = row + [""] * max(0, len(headers) - len(row))
+        row = row[: len(headers)]
+        records.append(dict(zip(headers, row)))
+    return records
+
+
+_EXPECTED_HEADERS = [
+    "Prediction_Time", "Entry_Price", "Window_Start_Price", "Prediction",
+    "Confidence", "Target_Time", "Close_Price", "Outcome",
+    "Polymarket_Odds", "PM_Strike_Price", "Seconds_Left", "Model",
+]
+
+def _ensure_sheet_headers(sheet):
+    """Write any missing column headers to row 1 without touching data rows."""
+    current = sheet.row_values(1)
+    updates = []
+    for i, expected in enumerate(_EXPECTED_HEADERS, start=1):
+        if i > len(current) or current[i - 1].strip() == "":
+            updates.append((1, i, expected))
+    for r, c, v in updates:
+        sheet.update_cell(r, c, v)
 
 
 def load_history_from_sheets():
     try:
         client = get_gspread_client()
         sheet = client.open("BTC_AI_Tracker").sheet1
+        _ensure_sheet_headers(sheet)
         records = _fetch_sheet_records()
 
         if not records:
