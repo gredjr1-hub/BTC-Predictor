@@ -285,11 +285,19 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+@st.cache_data(ttl=120)
+def _fetch_sheet_records():
+    """Cached sheet read — 2-minute TTL to reduce Google Sheets API quota usage."""
+    client = get_gspread_client()
+    sheet = client.open("BTC_AI_Tracker").sheet1
+    return sheet.get_all_records()
+
+
 def load_history_from_sheets():
     try:
         client = get_gspread_client()
         sheet = client.open("BTC_AI_Tracker").sheet1
-        records = sheet.get_all_records()
+        records = _fetch_sheet_records()
 
         if not records:
             return pd.DataFrame(), sheet
@@ -350,6 +358,7 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
 
                 sheet.update_cell(idx + 2, 7, round(actual_close, 2))   # col G = Close_Price
                 sheet.update_cell(idx + 2, 8, outcome)                   # col H = Outcome
+                _fetch_sheet_records.clear()   # invalidate cache after resolver writes outcomes
 
     return history_df
 
@@ -643,6 +652,7 @@ with tab1:
                             strike_val,                  # Col 10: PM_Strike_Price
                         ]
                         sheet.append_row(new_row)
+                        _fetch_sheet_records.clear()   # invalidate read cache so other tabs see new row
                         st.success("✅ Prediction successfully logged to Google Sheets!")
 
                     st.session_state.last_auto_target = target_time
@@ -984,6 +994,13 @@ with tab4:
     # Load history (may already be loaded in tab2 context, but tabs are independent blocks)
     sim_history, _ = load_history_from_sheets()
 
+    _apply_skip_rules = st.toggle(
+        "Apply skip rules (high-odds / low-confidence filter)",
+        value=True,
+        help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
+             "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
+    )
+
     if sim_history.empty:
         st.info("No predictions found in the Google Sheet yet. Run predictions to start tracking!")
     else:
@@ -1024,8 +1041,8 @@ with tab4:
 
                 if odds >= HIGH_ODDS_THRESHOLD:
                     # Market is very confident your direction wins → small payout
-                    # Skip unless AI is also highly confident
-                    if conf < MIN_CONF_FOR_HIGH_ODDS:
+                    # Skip unless AI is also highly confident (or skip rules disabled)
+                    if _apply_skip_rules and conf < MIN_CONF_FOR_HIGH_ODDS:
                         actual_outcome = row["Outcome"]   # "Win" or "Loss" from sheet
                         if actual_outcome == "Win":
                             hypothetical_pnl = round(balance * MIN_BET_PCT * (1.0 / odds - 1.0), 2)
