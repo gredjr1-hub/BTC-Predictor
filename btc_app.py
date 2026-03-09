@@ -452,7 +452,9 @@ def load_history_from_sheets():
         return pd.DataFrame(), None
 
 
-def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
+def resolve_pending_trades_in_sheets(history_df, sheet, live_data=None):
+    """Resolve pending trades.  live_data (Kraken OHLCV) is optional — only needed
+    as a last resort when both the Gamma API and Pyth historical endpoint fail."""
     if history_df.empty or sheet is None:
         return history_df
 
@@ -485,12 +487,14 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
         if outcome is None:
             # Both prices from Pyth so the comparison uses the same oracle
             close_price = fetch_pyth_price_at(target_time)
-            if close_price is None:
+            if close_price is None and live_data is not None:
                 # Last resort: Kraken candle at or after target
                 valid_candles = live_data[live_data.index >= target_time]
-                if valid_candles.empty:
-                    continue   # can't resolve yet — leave Pending
-                close_price = float(valid_candles["Close"].iloc[0])
+                if not valid_candles.empty:
+                    close_price = float(valid_candles["Close"].iloc[0])
+
+            if close_price is None:
+                continue   # can't resolve yet — leave Pending
 
             # NaN-safe reference price: prefer stored window_start_price, then fetch
             # it fresh from Pyth at window open, then fall back to entry price
@@ -697,7 +701,7 @@ with tab1:
             live_data = get_live_prediction_data()
             history_df, sheet = load_history_from_sheets()
 
-            history_df = resolve_pending_trades_in_sheets(live_data, history_df, sheet)
+            history_df = resolve_pending_trades_in_sheets(history_df, sheet, live_data=live_data)
 
             current_state = live_data.iloc[-1:]
             current_price = float(current_state["Close"].values[0])
@@ -875,11 +879,16 @@ with tab2:
 
     history, _sheet2 = load_history_from_sheets()
 
-    if st.button("🔄 Resolve Pending Trades", help="Check Polymarket and Pyth for outcomes of all pending windows"):
+    # Auto-resolve on every page render — Gamma API + Pyth only, no Kraken fetch needed
+    _pending_count = int((history["Outcome"] == "Pending").sum()) if not history.empty else 0
+    if _pending_count > 0:
+        history = resolve_pending_trades_in_sheets(history, _sheet2)
+
+    if st.button("🔄 Resolve Pending Trades (+ Kraken fallback)", help="Force-resolve using Kraken candles as last resort if Gamma/Pyth unavailable"):
         with st.spinner("Resolving pending trades…"):
             _live2 = get_live_prediction_data()
-            history = resolve_pending_trades_in_sheets(_live2, history, _sheet2)
-        st.success("Done — pending trades resolved where data was available.")
+            history = resolve_pending_trades_in_sheets(history, _sheet2, live_data=_live2)
+        st.success("Done.")
         st.rerun()
 
     _exclude_pre_odds = st.toggle(
