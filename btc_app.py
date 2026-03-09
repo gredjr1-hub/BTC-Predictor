@@ -285,8 +285,8 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                 history_df.at[idx, "Close_Price"] = round(actual_close, 2)
                 history_df.at[idx, "Outcome"] = outcome
 
-                sheet.update_cell(idx + 2, 6, round(actual_close, 2))
-                sheet.update_cell(idx + 2, 7, outcome)
+                sheet.update_cell(idx + 2, 7, round(actual_close, 2))   # col G = Close_Price
+                sheet.update_cell(idx + 2, 8, outcome)                   # col H = Outcome
 
     return history_df
 
@@ -505,15 +505,15 @@ with tab1:
                     # Odds for the predicted direction (stored as col 8 for P&L calc)
                     odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
                     new_row = [
-                        str(current_time),
-                        current_price,          # Entry_Price (when bet was placed)
-                        direction,
-                        round(confidence_pct, 2),
-                        str(target_time),
-                        "",                     # Close_Price (filled by resolver)
-                        "Pending",              # Outcome (filled by resolver)
-                        odds_val,               # Polymarket_Odds
-                        window_start_price,     # Window_Start_Price (col 9)
+                        str(current_time),           # Col 1: Prediction_Time
+                        current_price,               # Col 2: Entry_Price
+                        window_start_price,          # Col 3: Window_Start_Price (col C in sheet)
+                        direction,                   # Col 4: Prediction
+                        round(confidence_pct, 2),    # Col 5: Confidence
+                        str(target_time),            # Col 6: Target_Time
+                        "",                          # Col 7: Close_Price (filled by resolver)
+                        "Pending",                   # Col 8: Outcome (filled by resolver)
+                        odds_val,                    # Col 9: Polymarket_Odds
                     ]
                     sheet.append_row(new_row)
                     st.success("✅ Prediction successfully logged to Google Sheets!")
@@ -729,7 +729,7 @@ with tab3:
         current_window_target = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
 
         with st.expander("🔍 Odds fetch diagnostics", expanded=False):
-            _diag_ts = int(current_window_target.replace(tzinfo=timezone.utc).timestamp())
+            _diag_ts = int(current_window_target.replace(tzinfo=timezone.utc).timestamp()) - 300  # match fetch_polymarket_odds
             _diag_slug = f"btc-updown-5m-{_diag_ts}"
             _diag_url = f"https://gamma-api.polymarket.com/events?slug={_diag_slug}"
             st.write(f"**Window target (UTC):** `{current_window_target}`")
