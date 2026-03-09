@@ -483,8 +483,8 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
 
         # --- Fallback: Pyth price comparison (Polymarket not yet resolved) ---
         if outcome is None:
+            # Both prices from Pyth so the comparison uses the same oracle
             close_price = fetch_pyth_price_at(target_time)
-
             if close_price is None:
                 # Last resort: Kraken candle at or after target
                 valid_candles = live_data[live_data.index >= target_time]
@@ -492,7 +492,8 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                     continue   # can't resolve yet — leave Pending
                 close_price = float(valid_candles["Close"].iloc[0])
 
-            # NaN-safe reference price: window start > entry
+            # NaN-safe reference price: prefer stored window_start_price, then fetch
+            # it fresh from Pyth at window open, then fall back to entry price
             def _first_valid_price(*cols):
                 for c in cols:
                     v = row.get(c)
@@ -505,6 +506,9 @@ def resolve_pending_trades_in_sheets(live_data, history_df, sheet):
                 return None
 
             ref_price = _first_valid_price("Window_Start_Price", "Entry_Price")
+            if ref_price is None:
+                # Row predates Window_Start_Price column — fetch from Pyth now
+                ref_price = fetch_pyth_price_at(target_time - timedelta(minutes=5))
 
             if ref_price is None:
                 continue
