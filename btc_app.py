@@ -176,9 +176,12 @@ def fetch_polymarket_odds(target_time):
 
 def fetch_polymarket_resolution(target_time) -> str | None:
     """
-    Query Gamma API for a resolved 5-minute BTC window.
+    Query Gamma API for a settled 5-minute BTC window.
     target_time: the window close time (UTC-naive datetime).
-    Returns 'UP', 'DOWN', or None (unresolved / not found).
+    Returns 'UP', 'DOWN', or None (not yet settled / not found).
+
+    Note: Polymarket never sets resolved=True for these markets — settlement is
+    signalled purely by outcomePrices reaching 1.0/0.0 once the market is closed.
     """
     try:
         import requests as _r
@@ -192,16 +195,23 @@ def fetch_polymarket_resolution(target_time) -> str | None:
         if not data:
             return None
         event = data[0] if isinstance(data, list) else data
+
+        # Only attempt to read resolution from closed markets
+        if not event.get("closed"):
+            return None
+
         markets = event.get("markets", [])
         for mkt in markets:
-            if mkt.get("resolved"):
-                raw_outcomes = mkt.get("outcomes", "[]")
-                raw_prices = mkt.get("outcomePrices", "[]")
-                outcomes = _json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
-                prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                for outcome, price in zip(outcomes, prices):
+            raw_outcomes = mkt.get("outcomes", "[]")
+            raw_prices = mkt.get("outcomePrices", "[]")
+            outcomes = _json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+            prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+            for outcome, price in zip(outcomes, prices):
+                try:
                     if float(price) >= 0.99:
                         return str(outcome).strip().upper()  # "UP" or "DOWN"
+                except (ValueError, TypeError):
+                    continue
         return None
     except Exception:
         return None
@@ -859,7 +869,14 @@ with tab1:
 with tab2:
     st.markdown("### Model Performance Analytics")
 
-    history, _ = load_history_from_sheets()
+    history, _sheet2 = load_history_from_sheets()
+
+    if st.button("🔄 Resolve Pending Trades", help="Check Polymarket and Pyth for outcomes of all pending windows"):
+        with st.spinner("Resolving pending trades…"):
+            _live2 = get_live_prediction_data()
+            history = resolve_pending_trades_in_sheets(_live2, history, _sheet2)
+        st.success("Done — pending trades resolved where data was available.")
+        st.rerun()
 
     _exclude_pre_odds = st.toggle(
         "Exclude pre-Polymarket rows from stats & log",
