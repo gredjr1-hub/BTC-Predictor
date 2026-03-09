@@ -69,9 +69,9 @@ def get_polymarket_url():
 @st.cache_data(ttl=30)
 def fetch_polymarket_odds(target_time):
     """Fetch UP/DOWN prices for the Polymarket 5-min BTC window opening 5 minutes before target_time.
-    Returns {"up": float, "down": float, "slug": str} or None on failure.
+    Returns {"up": float, "down": float, "slug": str, "price_to_beat": float|None} or None on failure.
     """
-    import json
+    import json, re
     import requests as _requests
     ts = int(target_time.replace(tzinfo=timezone.utc).timestamp()) - 300  # Polymarket slugs use window open time
     slug = f"btc-updown-5m-{ts}"
@@ -89,6 +89,7 @@ def fetch_polymarket_odds(target_time):
             return None
 
         result = {}
+        price_to_beat = None
         for market in markets:
             raw_outcomes = market.get("outcomes", "[]")
             raw_prices = market.get("outcomePrices", "[]")
@@ -105,9 +106,31 @@ def fetch_polymarket_odds(target_time):
                 elif "down" in key:
                     result["down"] = float(price)
 
+            # Extract price_to_beat: try direct API fields first, then parse market question
+            if price_to_beat is None:
+                for field in ("startPrice", "startBTCPrice", "strikePrice"):
+                    raw = market.get(field)
+                    if raw is not None:
+                        try:
+                            price_to_beat = float(raw)
+                        except Exception:
+                            pass
+                        break
+            if price_to_beat is None:
+                question = market.get("question", "")
+                m = re.search(r'(?:above|below)\s+\$?([\d,]+(?:\.\d+)?)', question, re.IGNORECASE)
+                if not m:
+                    m = re.search(r'\$\s*([\d,]+(?:\.\d+)?)', question)
+                if m:
+                    try:
+                        price_to_beat = float(m.group(1).replace(",", ""))
+                    except Exception:
+                        pass
+
         if "up" not in result or "down" not in result:
             return None
         result["slug"] = slug
+        result["price_to_beat"] = price_to_beat  # None if not parseable from API
         return result
     except Exception:
         return None
@@ -142,6 +165,8 @@ if auto_pilot:
     # Full-app rerun every 5 minutes (kept for your existing "Live Sync" behavior)
     st_autorefresh(interval=300000, key="data_refresh")
     st.sidebar.success("Live Sync Active: Fetching latest data every 5 minutes.")
+# Always refresh every 60s so Polymarket odds stay current regardless of auto_pilot
+st_autorefresh(interval=60000, key="odds_refresh")
 if prediction_mode == "Auto" and not auto_pilot:
     st.sidebar.info("Auto mode requires Live Sync to be enabled.")
 
@@ -508,24 +533,34 @@ with tab1:
                 else:
                     st.caption("Polymarket odds unavailable for this window.")
 
-                if sheet:
-                    # Odds for the predicted direction (stored as col 8 for P&L calc)
-                    odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
-                    new_row = [
-                        str(current_time),           # Col 1: Prediction_Time
-                        current_price,               # Col 2: Entry_Price
-                        window_start_price,          # Col 3: Window_Start_Price (col C in sheet)
-                        direction,                   # Col 4: Prediction
-                        round(confidence_pct, 2),    # Col 5: Confidence
-                        str(target_time),            # Col 6: Target_Time
-                        "",                          # Col 7: Close_Price (filled by resolver)
-                        "Pending",                   # Col 8: Outcome (filled by resolver)
-                        odds_val,                    # Col 9: Polymarket_Odds
-                    ]
-                    sheet.append_row(new_row)
-                    st.success("✅ Prediction successfully logged to Google Sheets!")
+                _window_secs_left = max(0, int((target_time - datetime.utcnow()).total_seconds()))
 
-                st.session_state.last_auto_target = target_time
+                if auto_trigger and pm_odds is None and _window_secs_left > 45:
+                    st.warning(
+                        "⏳ Polymarket odds not yet available — retrying on next refresh. "
+                        f"Window closes in {_window_secs_left}s."
+                    )
+                    # Don't set last_auto_target → allows retry on next 60-second rerun
+                else:
+                    if sheet:
+                        odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
+                        strike_val = round(pm_odds["price_to_beat"], 2) if pm_odds and pm_odds.get("price_to_beat") else ""
+                        new_row = [
+                            str(current_time),           # Col 1: Prediction_Time
+                            current_price,               # Col 2: Entry_Price
+                            window_start_price,          # Col 3: Window_Start_Price
+                            direction,                   # Col 4: Prediction
+                            round(confidence_pct, 2),    # Col 5: Confidence
+                            str(target_time),            # Col 6: Target_Time
+                            "",                          # Col 7: Close_Price (resolver)
+                            "Pending",                   # Col 8: Outcome (resolver)
+                            odds_val,                    # Col 9: Polymarket_Odds
+                            strike_val,                  # Col 10: PM_Strike_Price
+                        ]
+                        sheet.append_row(new_row)
+                        st.success("✅ Prediction successfully logged to Google Sheets!")
+
+                    st.session_state.last_auto_target = target_time
 
 with tab2:
     st.markdown("### Model Performance Analytics")
@@ -773,7 +808,7 @@ with tab3:
             )
             st.caption(
                 f"Market: `{live_odds['slug']}` · Window closes at "
-                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 30s · use button above for immediate refresh"
+                f"{fmt_et(current_window_target, '%H:%M %Z')} · Auto-refreshes every 60s · use button above for immediate refresh"
             )
         else:
             st.warning(
@@ -786,29 +821,65 @@ with tab3:
             st.link_button("Open on Polymarket ↗", polymarket_url)
 
         st.markdown("---")
-        st.markdown("#### 📈 Live BTC/USD Chart (5m)")
-        _tv_html = """
-<div class="tradingview-widget-container" style="height:420px">
-  <div id="tv_btc_chart" style="height:400px"></div>
-  <script src="https://s3.tradingview.com/tv.js"></script>
-  <script>
-  new TradingView.widget({
-    "container_id": "tv_btc_chart",
-    "autosize": true,
-    "symbol": "KRAKEN:XBTUSD",
-    "interval": "5",
-    "timezone": "America/New_York",
-    "theme": "dark",
-    "style": "1",
-    "locale": "en",
-    "hide_top_toolbar": false,
-    "hide_legend": false,
-    "allow_symbol_change": false,
-    "save_image": false
-  });
-  </script>
-</div>"""
-        components.html(_tv_html, height=420)
+        st.markdown("#### 📊 Polymarket Odds — Current Window")
+
+        # Accumulate odds readings for the current window in session_state
+        if "pm_odds_history" not in st.session_state:
+            st.session_state.pm_odds_history = []
+        if "pm_odds_window" not in st.session_state:
+            st.session_state.pm_odds_window = None
+
+        # Reset history when the window rolls over
+        if st.session_state.pm_odds_window != current_window_target:
+            st.session_state.pm_odds_history = []
+            st.session_state.pm_odds_window = current_window_target
+
+        if live_odds:
+            st.session_state.pm_odds_history.append({
+                "ts": datetime.utcnow(),
+                "up": live_odds["up"] * 100,
+                "down": live_odds["down"] * 100,
+            })
+
+        if len(st.session_state.pm_odds_history) >= 2:
+            import plotly.graph_objects as go
+            _hist = st.session_state.pm_odds_history
+            _times = [h["ts"] for h in _hist]
+            _ups = [h["up"] for h in _hist]
+            _downs = [h["down"] for h in _hist]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=_times, y=_ups, mode="lines+markers",
+                                     name="UP %", line=dict(color="lime", width=2)))
+            fig.add_trace(go.Scatter(x=_times, y=_downs, mode="lines+markers",
+                                     name="DOWN %", line=dict(color="tomato", width=2)))
+            fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
+            _chart_title = ""
+            if live_odds and live_odds.get("price_to_beat"):
+                _chart_title = f"Strike price: ${live_odds['price_to_beat']:,.2f}"
+            fig.update_layout(
+                title=_chart_title,
+                yaxis=dict(title="Probability %", range=[0, 100]),
+                xaxis_title="Time (UTC)",
+                height=300,
+                margin=dict(l=0, r=0, t=40, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white"),
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        elif live_odds:
+            st.caption("Collecting readings… chart appears after the second tick (~60s).")
+        else:
+            st.caption("No odds data available for chart.")
+
+        # Show price_to_beat as a prominent metric if parseable
+        if live_odds and live_odds.get("price_to_beat"):
+            st.metric(
+                "🎯 Polymarket Strike Price",
+                f"${live_odds['price_to_beat']:,.2f}",
+                help="BTC price to beat — parsed from the Polymarket market question for this window.",
+            )
 
 with tab4:
     st.markdown("### 💰 P&L Simulator")
