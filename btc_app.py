@@ -420,26 +420,21 @@ def load_history_from_sheets():
         df["Prediction_Time"] = pd.to_datetime(df["Prediction_Time"], errors='coerce')
         df["Target_Time"] = pd.to_datetime(df["Target_Time"], errors='coerce')
         # Silently discard any rows with unparseable timestamps (corrupted sheet cells)
-        bad_rows = df["Prediction_Time"].isna().sum()
-        if bad_rows:
+        if df["Prediction_Time"].isna().any():
             df.dropna(subset=["Prediction_Time"], inplace=True)
-        # Gracefully handle sheets that predate the Polymarket_Odds column
-        if "Polymarket_Odds" not in df.columns:
-            df["Polymarket_Odds"] = np.nan
-        else:
-            df["Polymarket_Odds"] = pd.to_numeric(df["Polymarket_Odds"], errors="coerce")
-        # Gracefully handle sheets that predate the Window_Start_Price column
-        if "Window_Start_Price" not in df.columns:
-            df["Window_Start_Price"] = np.nan
-        else:
-            df["Window_Start_Price"] = pd.to_numeric(df["Window_Start_Price"], errors="coerce")
-        # Gracefully handle sheets that predate the Seconds_Left / Model columns
-        if "Seconds_Left" not in df.columns:
-            df["Seconds_Left"] = np.nan
-        else:
-            df["Seconds_Left"] = pd.to_numeric(df["Seconds_Left"], errors="coerce")
+
+        # Coerce all numeric columns — get_all_values() returns everything as strings
+        for _col in ["Entry_Price", "Window_Start_Price", "Close_Price",
+                     "Confidence", "Polymarket_Odds", "PM_Strike_Price", "Seconds_Left"]:
+            if _col in df.columns:
+                df[_col] = pd.to_numeric(df[_col], errors="coerce")
+            else:
+                df[_col] = np.nan
+
+        # Gracefully handle sheets that predate the Model column
         if "Model" not in df.columns:
             df["Model"] = np.nan
+
         return df, sheet
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
