@@ -573,25 +573,26 @@ with tab1:
                         )
                     st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
 
-                # Inject variable-horizon features (model needs to know time remaining in window)
+                # Select the horizon-specific model based on minutes remaining in this window
                 _now_minute = current_time.minute % 5
-                _minutes_since_start = int(_now_minute)
-                _minutes_to_end = 5 - _minutes_since_start
+                _minutes_to_end = max(1, 5 - int(_now_minute))  # 5 at :00/:05, 1 at :04/:09...
+                horizon_model = model[_minutes_to_end]
+
+                # Build the 9-feature input for the selected model
                 _price_chg = (
                     (current_price - window_start_price) / window_start_price
                     if window_start_price and window_start_price != 0
                     else 0.0
                 )
+                _FEATURE_COLS = [
+                    'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
+                    'BB_Upper', 'BB_Lower', 'Volume_ROC', 'price_change_since_window_start'
+                ]
                 current_state = current_state.copy()
-                current_state["minutes_since_window_start"] = _minutes_since_start
-                current_state["minutes_to_window_end"] = _minutes_to_end
                 current_state["price_change_since_window_start"] = _price_chg
-
-                # Align to model's exact feature set (guards against version mismatches)
-                _model_cols = list(model.feature_names_in_)
-                current_state_pred = current_state[_model_cols]
-                prediction_val = model.predict(current_state_pred)[0]
-                probabilities = model.predict_proba(current_state_pred)[0]
+                current_state_pred = current_state[_FEATURE_COLS]
+                prediction_val = horizon_model.predict(current_state_pred)[0]
+                probabilities = horizon_model.predict_proba(current_state_pred)[0]
 
                 direction = "UP" if prediction_val == 1 else "DOWN"
                 confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
@@ -614,7 +615,7 @@ with tab1:
                 col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
                 col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
 
-                st.markdown(f"**Signal Strength:** :{color}[{signal_strength}]")
+                st.markdown(f"**Signal Strength:** :{color}[{signal_strength}] &nbsp; `{_minutes_to_end}-min model`")
 
                 # Window countdown
                 _now = datetime.utcnow()
