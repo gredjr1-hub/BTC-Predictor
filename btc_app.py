@@ -247,7 +247,6 @@ def get_live_prediction_data():
     df["BB_Upper"] = ta.volatility.bollinger_hband(df["Close"], window=20, window_dev=2)
     df["BB_Lower"] = ta.volatility.bollinger_lband(df["Close"], window=20, window_dev=2)
     df["Volume_ROC"] = df["Volume"].pct_change(periods=5)
-    df["Price_Delta_From_Window_Start"] = (df["Close"] - df["Close"].shift(5)) / df["Close"].shift(5)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
@@ -573,6 +572,20 @@ with tab1:
                             f"odds Δ {abs(pm_odds['up'] - st.session_state.last_pred_odds_up)*100:.1f}%"
                         )
                     st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
+
+                # Inject variable-horizon features (model needs to know time remaining in window)
+                _now_minute = current_time.minute % 5
+                _minutes_since_start = int(_now_minute)
+                _minutes_to_end = 5 - _minutes_since_start
+                _price_chg = (
+                    (current_price - window_start_price) / window_start_price
+                    if window_start_price and window_start_price != 0
+                    else 0.0
+                )
+                current_state = current_state.copy()
+                current_state["minutes_since_window_start"] = _minutes_since_start
+                current_state["minutes_to_window_end"] = _minutes_to_end
+                current_state["price_change_since_window_start"] = _price_chg
 
                 # Align to model's exact feature set (guards against version mismatches)
                 _model_cols = list(model.feature_names_in_)
