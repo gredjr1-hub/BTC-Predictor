@@ -884,12 +884,37 @@ with tab2:
     if _pending_count > 0:
         history = resolve_pending_trades_in_sheets(history, _sheet2)
 
-    if st.button("🔄 Resolve Pending Trades (+ Kraken fallback)", help="Force-resolve using Kraken candles as last resort if Gamma/Pyth unavailable"):
-        with st.spinner("Resolving pending trades…"):
-            _live2 = get_live_prediction_data()
-            history = resolve_pending_trades_in_sheets(history, _sheet2, live_data=_live2)
-        st.success("Done.")
-        st.rerun()
+    _btn_col1, _btn_col2 = st.columns(2)
+
+    with _btn_col1:
+        if st.button("🔄 Resolve Pending Trades (+ Kraken fallback)", help="Force-resolve using Kraken candles as last resort if Gamma/Pyth unavailable"):
+            with st.spinner("Resolving pending trades…"):
+                _live2 = get_live_prediction_data()
+                history = resolve_pending_trades_in_sheets(history, _sheet2, live_data=_live2)
+            st.success("Done.")
+            st.rerun()
+
+    with _btn_col2:
+        if st.button("🔁 Backfill PM_Resolution", help="Fetch Polymarket UP/DOWN outcome for all rows that are missing it — including already-resolved Win/Loss rows"):
+            with st.spinner("Backfilling PM_Resolution from Gamma API…"):
+                _filled = 0
+                _missing_mask = (
+                    history["PM_Resolution"].isna() | (history["PM_Resolution"].astype(str).str.strip() == "")
+                ) if "PM_Resolution" in history.columns else pd.Series(True, index=history.index)
+
+                for idx, row in history[_missing_mask].iterrows():
+                    target_time = row.get("Target_Time")
+                    if pd.isna(target_time) or target_time > datetime.utcnow():
+                        continue
+                    pm_res = fetch_polymarket_resolution(target_time)
+                    if pm_res in ("UP", "DOWN"):
+                        history.at[idx, "PM_Resolution"] = pm_res
+                        if _sheet2:
+                            _sheet2.update_cell(idx + 2, 10, pm_res)
+                        _filled += 1
+                _fetch_sheet_records.clear()
+            st.success(f"Backfilled PM_Resolution for {_filled} row(s).")
+            st.rerun()
 
     _exclude_pre_odds = st.toggle(
         "Exclude pre-Polymarket rows from stats & log",
