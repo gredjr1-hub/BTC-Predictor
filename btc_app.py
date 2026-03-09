@@ -468,20 +468,49 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.markdown("### Generate Next Move")
 
-    # Session state for auto-prediction deduplication
+    # Session state for prediction tracking
     if "last_auto_target" not in st.session_state:
         st.session_state.last_auto_target = None
+    if "last_pred_candle_ts" not in st.session_state:
+        st.session_state.last_pred_candle_ts = None   # candle timestamp of last logged prediction
+    if "last_pred_odds_up" not in st.session_state:
+        st.session_state.last_pred_odds_up = None     # UP odds used in last logged prediction
+    if "last_pred_target" not in st.session_state:
+        st.session_state.last_pred_target = None      # window the last prediction was for
+    if "last_pred_wall_time" not in st.session_state:
+        st.session_state.last_pred_wall_time = None   # wall-clock time of last logged prediction
 
-    # Check whether auto-mode should fire this rerun
     now_utc = datetime.utcnow().replace(microsecond=0)
-    auto_trigger = (
+    _current_window = snap_to_polymarket_window(now_utc)
+
+    # Reset per-window data tracking when a new window starts
+    if st.session_state.last_pred_target != _current_window:
+        st.session_state.last_pred_candle_ts = None
+        st.session_state.last_pred_odds_up = None
+
+    # First trigger: fires once at each 5-minute window boundary
+    _first_trigger = (
         prediction_mode == "Auto"
         and auto_pilot
         and is_at_polymarket_boundary(now_utc)
-        and st.session_state.last_auto_target != snap_to_polymarket_window(now_utc)
+        and st.session_state.last_auto_target != _current_window
     )
 
-    if auto_trigger:
+    # Refresh trigger: same window, at most once per ~60s (1-minute candle cadence)
+    _same_window = (st.session_state.last_pred_target == _current_window)
+    _last_wall = st.session_state.last_pred_wall_time
+    _enough_time = (_last_wall is None) or ((datetime.utcnow() - _last_wall).total_seconds() >= 58)
+    _refresh_trigger = (
+        prediction_mode == "Auto"
+        and auto_pilot
+        and _same_window
+        and _enough_time
+        and not _first_trigger
+    )
+
+    auto_trigger = _first_trigger or _refresh_trigger
+
+    if _first_trigger:
         st.info("Auto-prediction firing at Polymarket window boundary...")
 
     if st.button("Generate Live Prediction", type="primary") or auto_trigger:
@@ -505,19 +534,37 @@ with tab1:
             if not window_start_candles.empty:
                 window_start_price = float(window_start_candles["Close"].values[0])
             else:
-                # Fallback: use current price (same behavior as before)
                 window_start_price = current_price
 
             # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
             fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
             pm_odds = fetch_polymarket_odds(target_time)
 
-            if not history_df.empty and (history_df["Target_Time"] == target_time).any():
-                st.warning(
-                    f"Prediction already generated for window {fmt_et(target_time, '%H:%M %Z')}. "
-                    "Wait for the next 5-minute window."
-                )
+            # Check whether data has meaningfully changed since the last prediction this window
+            _is_manual = not auto_trigger
+            _candle_changed = (current_time != st.session_state.last_pred_candle_ts)
+            _odds_changed = (
+                pm_odds is not None
+                and st.session_state.last_pred_odds_up is not None
+                and abs(pm_odds["up"] - st.session_state.last_pred_odds_up) >= 0.01
+            )
+            _data_changed = _candle_changed or _odds_changed
+
+            # For auto refresh: silently skip if data hasn't changed
+            if _refresh_trigger and not _data_changed and not _is_manual:
+                st.caption("📊 Auto-checked: data unchanged since last prediction.")
+                st.session_state.last_pred_wall_time = datetime.utcnow()
             else:
+                if _refresh_trigger and _data_changed:
+                    _reasons = []
+                    if _candle_changed:
+                        _reasons.append("new candle")
+                    if _odds_changed:
+                        _reasons.append(
+                            f"odds Δ {abs(pm_odds['up'] - st.session_state.last_pred_odds_up)*100:.1f}%"
+                        )
+                    st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
+
                 # Align to model's exact feature set (guards against version mismatches)
                 _model_cols = list(model.feature_names_in_)
                 current_state_pred = current_state[_model_cols]
@@ -578,7 +625,7 @@ with tab1:
                         "⏳ Polymarket odds not yet available — retrying on next refresh. "
                         f"Window closes in {_window_secs_left}s."
                     )
-                    # Don't set last_auto_target → allows retry on next 60-second rerun
+                    # Don't set last_auto_target → allows retry on next rerun
                 else:
                     if sheet:
                         odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
@@ -599,6 +646,11 @@ with tab1:
                         st.success("✅ Prediction successfully logged to Google Sheets!")
 
                     st.session_state.last_auto_target = target_time
+                    st.session_state.last_pred_target = target_time
+                    st.session_state.last_pred_candle_ts = current_time
+                    st.session_state.last_pred_wall_time = datetime.utcnow()
+                    if pm_odds:
+                        st.session_state.last_pred_odds_up = pm_odds["up"]
 
 with tab2:
     st.markdown("### Model Performance Analytics")
@@ -974,15 +1026,23 @@ with tab4:
                     # Market is very confident your direction wins → small payout
                     # Skip unless AI is also highly confident
                     if conf < MIN_CONF_FOR_HIGH_ODDS:
+                        actual_outcome = row["Outcome"]   # "Win" or "Loss" from sheet
+                        if actual_outcome == "Win":
+                            hypothetical_pnl = round(balance * MIN_BET_PCT * (1.0 / odds - 1.0), 2)
+                            skip_label = "⏭️ Skipped (would Win)"
+                        else:
+                            hypothetical_pnl = round(-balance * MIN_BET_PCT, 2)
+                            skip_label = "⏭️ Skipped (would Loss)"
                         trades_log.append({
                             "Time": fmt_et(row["Prediction_Time"], "%m/%d %H:%M %Z"),
                             "Direction": row["Prediction"],
                             "Confidence": f"{conf:.1f}%",
                             "Odds": f"{odds:.3f} ({odds*100:.1f}%)",
                             "Bet %": "—",
-                            "Bet $": 0,
-                            "Outcome": "Skipped (low conf / high odds)",
+                            "Bet $": "—",
+                            "Outcome": skip_label,
                             "P&L": 0,
+                            "What-If P&L": hypothetical_pnl,
                             "Balance": round(balance, 2),
                         })
                         continue
@@ -1017,6 +1077,7 @@ with tab4:
                     "Bet $": round(bet_amount, 2),
                     "Outcome": row["Outcome"],
                     "P&L": round(pnl, 2),
+                    "What-If P&L": "—",
                     "Balance": round(balance, 2),
                 })
 
@@ -1089,6 +1150,10 @@ with tab4:
                     return "background-color: rgba(0, 255, 0, 0.15)"
                 elif val == "Loss":
                     return "background-color: rgba(255, 0, 0, 0.15)"
+                elif "would Win" in str(val):
+                    return "background-color: rgba(0, 255, 0, 0.07)"   # muted green
+                elif "would Loss" in str(val):
+                    return "background-color: rgba(255, 0, 0, 0.07)"   # muted red
                 return ""
 
             st.dataframe(
@@ -1098,7 +1163,12 @@ with tab4:
 
             skipped_count = sum(1 for t in trades_log if "Skipped" in str(t.get("Outcome", "")))
             if skipped_count:
-                st.caption(f"{skipped_count} bet(s) skipped — high-odds market with insufficient AI confidence.")
+                would_win = sum(1 for t in trades_log if "would Win" in str(t.get("Outcome", "")))
+                would_loss = sum(1 for t in trades_log if "would Loss" in str(t.get("Outcome", "")))
+                st.caption(
+                    f"{skipped_count} bet(s) skipped — high-odds market with insufficient AI confidence "
+                    f"({would_win} would have Won, {would_loss} would have Lost)."
+                )
 
             if excluded_count > 0:
                 st.info(
