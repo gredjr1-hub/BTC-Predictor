@@ -586,10 +586,12 @@ with tab1:
                 )
                 _FEATURE_COLS = [
                     'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
-                    'BB_Upper', 'BB_Lower', 'Volume_ROC', 'price_change_since_window_start'
+                    'BB_Upper', 'BB_Lower', 'Volume_ROC',
+                    'price_change_since_window_start', 'price_change_abs'
                 ]
                 current_state = current_state.copy()
                 current_state["price_change_since_window_start"] = _price_chg
+                current_state["price_change_abs"] = abs(_price_chg)
                 current_state_pred = current_state[_FEATURE_COLS]
                 prediction_val = horizon_model.predict(current_state_pred)[0]
                 probabilities = horizon_model.predict_proba(current_state_pred)[0]
