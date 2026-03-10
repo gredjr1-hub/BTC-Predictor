@@ -2923,6 +2923,14 @@ with tab6:
         )
 
     # ── Restore balances + trade history from sheet on first load ────────────
+    # Self-heal: if trade log exists but all prices are zero, it was loaded
+    # before the header fix — discard it so it reloads from the corrected sheet.
+    if st.session_state.at_trade_log and all(
+        t.get("Price", 0) == 0 for t in st.session_state.at_trade_log
+    ):
+        st.session_state.at_trade_log = []
+        st.session_state.at_btc_seeded = False
+
     if not st.session_state.at_btc_seeded and st.session_state.at_trade_log == []:
         try:
             _at_ws = get_autotrader_sheet()
