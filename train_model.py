@@ -61,9 +61,19 @@ def train_production_model(filepath):
         for h, rf in models.items()
     }
 
+    # Increment version number
+    _prev_meta = {}
+    try:
+        with open("model_metadata.json") as _f:
+            _prev_meta = json.load(_f)
+    except Exception:
+        pass
+    _model_version = _prev_meta.get("model_version", 0) + 1
+
     _meta = {
         "retrained_at_utc": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "script": "train_model.py",
+        "model_version": _model_version,
         "total_rows": len(df),
         "rows_per_horizon": {str(h): int((df["minutes_to_window_end"] == h).sum()) for h in range(1, 6)} if "minutes_to_window_end" in df.columns else None,
         "data_start": str(df.index.min()) if df.index.name == "Timestamp" else None,
@@ -82,6 +92,7 @@ def train_production_model(filepath):
     _hist_entry = {
         "retrained_at_utc": _meta["retrained_at_utc"],
         "script": _meta["script"],
+        "model_version": _model_version,
         "total_rows": _meta["total_rows"],
         "new_rows_added": None,
         "data_start": _meta["data_start"],

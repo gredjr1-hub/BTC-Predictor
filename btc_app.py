@@ -2543,15 +2543,19 @@ with tab5:
     if _data_end is None and _model_meta.get("data_end"):
         _data_end = pd.to_datetime(_model_meta["data_end"])
 
+    _model_version = _model_meta.get("model_version")
+
     # --- Summary bar ---
-    _smry_cols = st.columns(4)
+    _smry_cols = st.columns(5)
     with _smry_cols[0]:
         st.metric("Last Retrained", _retrain_display, delta=_mf_age_str, delta_color="inverse")
     with _smry_cols[1]:
-        st.metric("Training Rows (total)", f"{_total_train_rows:,}" if _total_train_rows else "—")
+        st.metric("Model Version", f"v{_model_version}" if _model_version else "—")
     with _smry_cols[2]:
-        st.metric("Data From", _data_start.strftime("%Y-%m-%d") if _data_start is not None else "—")
+        st.metric("Training Rows (total)", f"{_total_train_rows:,}" if _total_train_rows else "—")
     with _smry_cols[3]:
+        st.metric("Data From", _data_start.strftime("%Y-%m-%d") if _data_start is not None else "—")
+    with _smry_cols[4]:
         st.metric("Data To", _data_end.strftime("%Y-%m-%d") if _data_end is not None else "—")
 
     # --- Provenance caption ---
@@ -2636,7 +2640,8 @@ with tab5:
         else:
             _status = "✅ Healthy"
 
-        with st.expander(f"**{_hz_label} model** — {_status}", expanded=True):
+        _hz_version_tag = f" v{_model_version}" if _model_version else ""
+        with st.expander(f"**{_hz_label} model{_hz_version_tag}** — {_status}", expanded=True):
             _card_cols = st.columns(5)
             with _card_cols[0]:
                 st.metric("Training rows", f"{_hz_rows:,}" if _hz_rows else "—")
@@ -2705,6 +2710,7 @@ with tab5:
             _hist_rows = []
             for _e in reversed(_model_history):  # newest first
                 _hist_rows.append({
+                    "Version": f"v{_e['model_version']}" if _e.get("model_version") else "—",
                     "Date / Time (UTC)": _e.get("retrained_at_utc", "—"),
                     "Script": _e.get("script", "—"),
                     "Total Rows": f"{_e['total_rows']:,}" if _e.get("total_rows") else "—",
@@ -2722,7 +2728,8 @@ with tab5:
                 st.divider()
                 st.markdown("**Feature Importance by Retrain**")
                 for _e in reversed(_hist_with_fi):  # newest first
-                    _fi_label = f"{_e.get('retrained_at_utc', '—')} — {_e.get('script', '—')}"
+                    _e_ver = f"v{_e['model_version']} · " if _e.get("model_version") else ""
+                    _fi_label = f"{_e_ver}{_e.get('retrained_at_utc', '—')} — {_e.get('script', '—')}"
                     with st.expander(_fi_label, expanded=False):
                         _fi_data = _e["feature_importance"]
                         _is_per_horizon = isinstance(next(iter(_fi_data.values()), None), dict)

@@ -132,9 +132,12 @@ def stitch_and_train(new_data):
     except Exception:
         pass
 
+    _model_version = _prev_meta.get("model_version", 0) + 1
+
     _meta = {
         "retrained_at_utc": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "script": "update_brain.py",
+        "model_version": _model_version,
         "total_rows": len(combined_df),
         "rows_per_horizon": {str(h): int((combined_df["minutes_to_window_end"] == h).sum()) for h in range(1, 6)},
         "data_start": str(combined_df.index.min()),
@@ -152,6 +155,7 @@ def stitch_and_train(new_data):
     _hist_entry = {
         "retrained_at_utc": _meta["retrained_at_utc"],
         "script": _meta["script"],
+        "model_version": _model_version,
         "total_rows": _meta["total_rows"],
         "new_rows_added": _meta["new_rows_added"],
         "data_start": _meta["data_start"],
