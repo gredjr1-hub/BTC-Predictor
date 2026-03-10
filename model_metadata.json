@@ -1,6 +1,7 @@
 {
   "retrained_at_utc": "2026-03-10 15:41:34",
   "script": "update_brain.py",
+  "model_version": 2,
   "total_rows": 588869,
   "rows_per_horizon": {
     "1": 111636,

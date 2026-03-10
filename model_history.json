@@ -2,6 +2,7 @@
   {
     "retrained_at_utc": "2026-03-10 15:37:52",
     "script": "update_brain.py",
+    "model_version": 1,
     "total_rows": 588866,
     "new_rows_added": 600,
     "data_start": "2024-03-05 02:31:00",
@@ -72,6 +73,7 @@
   {
     "retrained_at_utc": "2026-03-10 15:41:34",
     "script": "update_brain.py",
+    "model_version": 2,
     "total_rows": 588869,
     "new_rows_added": 3,
     "data_start": "2024-03-05 02:31:00",
