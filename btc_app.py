@@ -3089,6 +3089,49 @@ with tab6:
     _at_m3.metric("BTC Held", f"{st.session_state.at_btc:.6f} BTC" if st.session_state.at_btc else "—")
     _at_m4.metric("BTC Value", f"${_at_btc_value:,.2f}")
 
+    # ── Portfolio value chart ──────────────────────────────────────────────────
+    if st.session_state.at_trade_log:
+        _at_chart_data = list(reversed(st.session_state.at_trade_log))
+        _at_times = [t["Trade_Time"] for t in _at_chart_data]
+        _at_pvals = [t["Portfolio_Value"] for t in _at_chart_data]
+        _at_dirs  = [t["Direction"] for t in _at_chart_data]
+        _at_confs = [t["Confidence"] for t in _at_chart_data]
+        _at_prices = [t["Price"] for t in _at_chart_data]
+
+        _at_hover = [
+            f"{_at_times[i]}<br>{_at_dirs[i]} | Conf: {_at_confs[i]:.1f}%<br>"
+            f"Price: ${_at_prices[i]:,.2f}<br>Portfolio: ${_at_pvals[i]:,.2f}"
+            for i in range(len(_at_chart_data))
+        ]
+        _at_colors = ["#00c896" if d == "UP" else "#ff4b4b" for d in _at_dirs]
+        _at_symbols = ["triangle-up" if d == "UP" else "triangle-down" for d in _at_dirs]
+
+        _at_fig = go.Figure()
+        _at_fig.add_trace(go.Scatter(
+            x=_at_times, y=_at_pvals,
+            mode="lines+markers",
+            line=dict(color="#7c8cf8", width=2),
+            marker=dict(color=_at_colors, symbol=_at_symbols, size=12,
+                        line=dict(width=1, color="white")),
+            hovertext=_at_hover,
+            hoverinfo="text",
+            name="Portfolio Value",
+        ))
+        _at_fig.add_hline(
+            y=1000.0, line_dash="dot", line_color="gray",
+            annotation_text="Start $1,000", annotation_position="bottom right",
+        )
+        _at_fig.update_layout(
+            title="Portfolio Value Over Trades",
+            xaxis_title="Trade Time (UTC)",
+            yaxis_title="Portfolio Value ($)",
+            template="plotly_dark",
+            height=350,
+            margin=dict(l=0, r=0, t=40, b=0),
+            showlegend=False,
+        )
+        st.plotly_chart(_at_fig, use_container_width=True)
+
     # ── Trade history ─────────────────────────────────────────────────────────
     if st.session_state.at_trade_log:
         st.markdown("#### Trade History")
