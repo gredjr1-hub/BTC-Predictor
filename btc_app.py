@@ -1332,6 +1332,43 @@ with tab3:
                 help="BTC price to beat — parsed from the Polymarket market question for this window.",
             )
 
+def _quick_pl_sim(trades_df, apply_skip_rules=True):
+    """Lightweight P&L simulation used by the auto-optimizer.
+    Returns (final_balance, n_trades_executed). Mirrors the main tab4 logic exactly.
+    """
+    STARTING_BALANCE = 1000.0
+    MIN_BET_PCT = 0.025
+    MAX_BET_PCT = 0.05
+    HIGH_ODDS_THRESHOLD = 0.65
+    MIN_CONF_FOR_HIGH_ODDS = 60.0
+    CONTRARIAN_SKIP_THRESHOLD = 0.30
+    balance = STARTING_BALANCE
+    n_sim = 0
+    for _, row in trades_df.iterrows():
+        try:
+            conf = float(row["Confidence"])
+            odds = float(row["Polymarket_Odds"])
+            outcome = row["Outcome"]
+        except (ValueError, TypeError):
+            continue
+        if apply_skip_rules:
+            if odds < CONTRARIAN_SKIP_THRESHOLD:
+                continue
+            if odds >= HIGH_ODDS_THRESHOLD and conf < MIN_CONF_FOR_HIGH_ODDS:
+                continue
+        if odds < 0.5:
+            bet_pct = min(MAX_BET_PCT, MIN_BET_PCT + (conf - 50) / 100 * MAX_BET_PCT)
+        else:
+            bet_pct = MIN_BET_PCT
+        bet_amount = balance * bet_pct
+        n_sim += 1
+        if outcome == "Win":
+            balance += bet_amount * (1.0 / odds - 1.0)
+        else:
+            balance -= bet_amount
+    return balance, n_sim
+
+
 with tab4:
     st.markdown("### 💰 P&L Simulator")
     st.markdown(
@@ -1350,6 +1387,35 @@ with tab4:
         help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
              "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
     )
+    _pl_row1a, _pl_row1b, _pl_row1c = st.columns(3)
+    with _pl_row1a:
+        _pl_time_opts = ["All Time", "Past 24h", "Past 12h", "Past 1h"]
+        _pl_time_filter = st.selectbox(
+            "Time window",
+            options=_pl_time_opts,
+            index=_pl_time_opts.index(st.session_state.get("pl_time", "All Time")),
+            key="pl_time",
+            help="Restrict the simulation to trades within this lookback window.",
+        )
+    with _pl_row1b:
+        _pl_bucket_opts = ["All", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _pl_odds_bucket = st.selectbox(
+            "Odds bucket",
+            options=_pl_bucket_opts,
+            index=_pl_bucket_opts.index(st.session_state.get("pl_odds_bucket", "All")),
+            key="pl_odds_bucket",
+            help="Only include trades where Polymarket odds fell in this range.",
+        )
+    with _pl_row1c:
+        _pl_dir_opts = ["All", "UP", "DOWN"]
+        _pl_dir_filter = st.selectbox(
+            "Direction",
+            options=_pl_dir_opts,
+            index=_pl_dir_opts.index(st.session_state.get("pl_dir", "All")),
+            key="pl_dir",
+            help="Filter to UP (Long) or DOWN (Short) predictions only.",
+        )
+
     _pl_col1, _pl_col2 = st.columns(2)
     with _pl_col1:
         _pl_available_models = (
@@ -1357,10 +1423,16 @@ with tab4:
             if "Model" in sim_history.columns and not sim_history.empty
             else ["All"]
         )
+        _pl_model_default_idx = (
+            _pl_available_models.index(st.session_state.get("pl_model", "All"))
+            if st.session_state.get("pl_model", "All") in _pl_available_models
+            else 0
+        )
         _pl_model_filter = st.selectbox(
             "Filter by model horizon",
             options=_pl_available_models,
-            index=0,
+            index=_pl_model_default_idx,
+            key="pl_model",
             help="Only include trades that used a specific model horizon. "
                  "Useful for excluding late-window 1-min or 2-min predictions.",
         )
@@ -1369,8 +1441,9 @@ with tab4:
             "Min Confidence (%)",
             min_value=50.0,
             max_value=100.0,
-            value=50.0,
+            value=float(st.session_state.get("pl_min_conf", 50.0)),
             step=1.0,
+            key="pl_min_conf",
             help="Exclude trades where AI confidence was below this threshold.",
         )
 
@@ -1385,15 +1458,125 @@ with tab4:
             & (completed_trades_sim["Polymarket_Odds"] > 0)
         ].sort_values("Prediction_Time").reset_index(drop=True)
 
-        # Apply model and confidence filters
+        # Apply all filters
         if _pl_model_filter != "All" and "Model" in completed_with_odds.columns:
             completed_with_odds = completed_with_odds[completed_with_odds["Model"] == _pl_model_filter]
         if _pl_min_conf > 50.0 and "Confidence" in completed_with_odds.columns:
             completed_with_odds = completed_with_odds[
                 pd.to_numeric(completed_with_odds["Confidence"], errors="coerce") >= _pl_min_conf
             ]
+        _pl_tw_hours = {"Past 24h": 24, "Past 12h": 12, "Past 1h": 1}
+        if _pl_time_filter in _pl_tw_hours:
+            _tw_cutoff = datetime.utcnow() - timedelta(hours=_pl_tw_hours[_pl_time_filter])
+            completed_with_odds = completed_with_odds[completed_with_odds["Prediction_Time"] >= _tw_cutoff]
+        if _pl_dir_filter != "All" and "Prediction" in completed_with_odds.columns:
+            completed_with_odds = completed_with_odds[completed_with_odds["Prediction"] == _pl_dir_filter]
+        _pl_bucket_map = {
+            "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
+            "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
+        }
+        if _pl_odds_bucket != "All":
+            _blo, _bhi = _pl_bucket_map[_pl_odds_bucket]
+            completed_with_odds = completed_with_odds[
+                (completed_with_odds["Polymarket_Odds"] >= _blo) &
+                (completed_with_odds["Polymarket_Odds"] < _bhi)
+            ]
 
         excluded_count = len(completed_trades_sim) - len(completed_with_odds)
+
+        # --- Auto-Optimizer ---
+        st.divider()
+        _opt_btn_col, _opt_result_col = st.columns([1, 3])
+        _run_opt = _opt_btn_col.button(
+            "⚡ Auto-Optimize Filters",
+            help="Searches all filter combinations to find the highest simulated P&L (requires ≥5 trades per combo).",
+        )
+        if _run_opt:
+            with st.spinner("Searching filter combinations…"):
+                _opt_base = sim_history[
+                    sim_history["Outcome"].isin(["Win", "Loss"]) &
+                    sim_history["Polymarket_Odds"].notna() &
+                    (sim_history["Polymarket_Odds"] > 0)
+                ].copy().sort_values("Prediction_Time")
+
+                _opt_tw_map = {"All Time": None, "Past 24h": 24, "Past 12h": 12, "Past 1h": 1}
+                _opt_bkt_map = {
+                    "All": None,
+                    "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
+                    "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
+                }
+                _opt_dirs = ["All", "UP", "DOWN"]
+                _opt_models = (
+                    ["All"] + sorted(_opt_base["Model"].dropna().unique().tolist())
+                    if "Model" in _opt_base.columns else ["All"]
+                )
+                _opt_conf_vals = [50, 55, 60, 65, 70, 75, 80]
+
+                _best_bal = 1000.0
+                _best_params = None
+
+                for _otw, _otw_h in _opt_tw_map.items():
+                    _s1 = _opt_base.copy()
+                    if _otw_h:
+                        _s1 = _s1[_s1["Prediction_Time"] >= datetime.utcnow() - timedelta(hours=_otw_h)]
+                    for _obk, _obk_r in _opt_bkt_map.items():
+                        _s2 = _s1.copy()
+                        if _obk_r:
+                            _s2 = _s2[(_s2["Polymarket_Odds"] >= _obk_r[0]) & (_s2["Polymarket_Odds"] < _obk_r[1])]
+                        for _odir in _opt_dirs:
+                            _s3 = _s2[_s2["Prediction"] == _odir].copy() if _odir != "All" else _s2.copy()
+                            for _omdl in _opt_models:
+                                _s4 = _s3[_s3["Model"] == _omdl].copy() if (_omdl != "All" and "Model" in _s3.columns) else _s3.copy()
+                                for _omc in _opt_conf_vals:
+                                    _s5 = _s4[_s4["Confidence"] >= _omc].copy() if (_omc > 50 and "Confidence" in _s4.columns) else _s4.copy()
+                                    if len(_s5) < 5:
+                                        continue
+                                    _obal, _on = _quick_pl_sim(_s5, apply_skip_rules=True)
+                                    if _obal > _best_bal:
+                                        _best_bal = _obal
+                                        _best_params = {
+                                            "time": _otw, "bucket": _obk,
+                                            "dir": _odir, "model": _omdl,
+                                            "min_conf": float(_omc),
+                                            "balance": _obal, "n": _on,
+                                            "roi": (_obal - 1000.0) / 1000.0 * 100,
+                                        }
+
+                st.session_state["pl_opt_result"] = _best_params
+
+        if st.session_state.get("pl_opt_result"):
+            _r = st.session_state["pl_opt_result"]
+            _opt_result_col.success(
+                f"**Best found:** {_r['time']} · {_r['bucket']} odds · "
+                f"{_r['dir']} direction · {_r['model']} model · "
+                f"Min conf {_r['min_conf']:.0f}% → "
+                f"**${_r['balance']:,.2f}** ({_r['roi']:+.1f}% ROI, {_r['n']} trades)"
+            )
+            st.markdown(
+                f"#### 🔍 Optimizer Recommendation\n\n"
+                f"The auto-optimizer tested all combinations of time window, odds bucket, direction, "
+                f"model, and confidence threshold. The highest simulated P&L was achieved with:\n\n"
+                f"- **Time window:** {_r['time']}\n"
+                f"- **Odds bucket:** {_r['bucket']}\n"
+                f"- **Direction:** {_r['dir']}\n"
+                f"- **Model:** {_r['model']}\n"
+                f"- **Min confidence:** {_r['min_conf']:.0f}%\n\n"
+                f"Simulated result: **${_r['balance']:,.2f}** balance (**{_r['roi']:+.1f}% ROI**) "
+                f"over **{_r['n']}** executed trades (skip rules applied). "
+                f"This is the historically optimal configuration — it may not generalise to future trades."
+            )
+            if st.button("✅ Apply Optimal Filters"):
+                st.session_state["pl_time"] = _r["time"]
+                st.session_state["pl_odds_bucket"] = _r["bucket"]
+                st.session_state["pl_dir"] = _r["dir"]
+                st.session_state["pl_model"] = _r["model"]
+                st.session_state["pl_min_conf"] = _r["min_conf"]
+                st.rerun()
+        elif not _run_opt:
+            # Show a placeholder hint when no result yet
+            _opt_result_col.caption("Click ⚡ to find the filter combination with the highest historical P&L.")
+
+        st.divider()
 
         if completed_with_odds.empty:
             st.info(
