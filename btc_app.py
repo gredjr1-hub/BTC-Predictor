@@ -1733,6 +1733,86 @@ with tab3:
             help="Exclude trades where AI confidence was below this threshold.",
         )
 
+    # --- Filter presets ---
+    _presets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pl_filter_presets.json")
+
+    def _load_presets():
+        try:
+            with open(_presets_path) as _pf:
+                return json.load(_pf)
+        except Exception:
+            return {}
+
+    def _save_presets(presets):
+        with open(_presets_path, "w") as _pf:
+            json.dump(presets, _pf, indent=2)
+
+    _presets = _load_presets()
+
+    with st.expander("💾 Filter Presets", expanded=False):
+        _pre_save_col, _pre_load_col = st.columns(2)
+
+        with _pre_save_col:
+            st.markdown("**Save current filters**")
+            _preset_name = st.text_input("Preset name", placeholder="e.g. High-odds UP", key="pl_preset_name_input")
+            if st.button("Save", key="pl_preset_save_btn"):
+                if _preset_name.strip():
+                    _current_bucket = st.session_state.get("pl_odds_bucket", "All")
+                    _presets[_preset_name.strip()] = {
+                        "time": st.session_state.get("pl_time", "All Time"),
+                        "bucket": _current_bucket,
+                        "bucket_lo": st.session_state.get("pl_cust_lo_pct", 60) if _current_bucket == "Custom" else None,
+                        "bucket_hi": st.session_state.get("pl_cust_hi_pct", 100) if _current_bucket == "Custom" else None,
+                        "dir": st.session_state.get("pl_dir", "All"),
+                        "model": st.session_state.get("pl_model", "All"),
+                        "min_conf": float(st.session_state.get("pl_min_conf", 50.0)),
+                        "skip_rules": bool(st.session_state.get("pl_skip_rules", True)),
+                        "bet_scaling": bool(st.session_state.get("pl_bet_scaling", True)),
+                        "saved_at": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                    }
+                    _save_presets(_presets)
+                    st.success(f"Saved '{_preset_name.strip()}'")
+                    st.rerun()
+                else:
+                    st.warning("Enter a name before saving.")
+
+        with _pre_load_col:
+            st.markdown("**Load / delete a preset**")
+            if _presets:
+                _preset_choice = st.selectbox(
+                    "Select preset",
+                    options=list(_presets.keys()),
+                    key="pl_preset_choice",
+                )
+                _p = _presets[_preset_choice]
+                st.caption(f"Saved: {_p.get('saved_at', '—')}")
+                _load_col, _del_col = st.columns(2)
+                with _load_col:
+                    if st.button("Load", key="pl_preset_load_btn"):
+                        _pending = {
+                            "time": _p.get("time", "All Time"),
+                            "bucket": _p.get("bucket", "All"),
+                            "bucket_range": (
+                                (_p["bucket_lo"] / 100, _p["bucket_hi"] / 100)
+                                if _p.get("bucket") == "Custom" and _p.get("bucket_lo") is not None
+                                else None
+                            ),
+                            "dir": _p.get("dir", "All"),
+                            "model": _p.get("model", "All"),
+                            "min_conf": float(_p.get("min_conf", 50.0)),
+                            "skip_rules": bool(_p.get("skip_rules", True)),
+                            "bet_scaling": bool(_p.get("bet_scaling", True)),
+                        }
+                        st.session_state["_pl_apply_pending"] = _pending
+                        st.rerun()
+                with _del_col:
+                    if st.button("Delete", key="pl_preset_del_btn"):
+                        del _presets[_preset_choice]
+                        _save_presets(_presets)
+                        st.rerun()
+            else:
+                st.caption("No presets saved yet.")
+
     if sim_history.empty:
         st.info("No predictions found in the Google Sheet yet. Run predictions to start tracking!")
     else:
@@ -2574,10 +2654,16 @@ with tab5:
                 else:
                     st.metric("Recent win rate (30d)", "< 5 trades")
             with _card_cols[4]:
-                _coverage = ""
+                st.caption("Training data span")
                 if _hz_earliest and _hz_latest:
-                    _coverage = f"{_hz_earliest.strftime('%Y-%m-%d')} → {_hz_latest.strftime('%Y-%m-%d')}"
-                st.metric("Training data span", _coverage if _coverage else "—")
+                    st.markdown(
+                        f"<div style='font-size:0.82em;line-height:1.4'>"
+                        f"{_hz_earliest.strftime('%Y-%m-%d')}<br>→ {_hz_latest.strftime('%Y-%m-%d')}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown("—")
 
             # Feature importance for this horizon
             _hz_fi = _live_importances.get(str(_hz))
