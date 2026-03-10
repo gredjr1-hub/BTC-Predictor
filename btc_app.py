@@ -1785,7 +1785,7 @@ with tab3:
                         "min_conf": float(st.session_state.get("pl_min_conf", 50.0)),
                         "skip_rules": bool(st.session_state.get("pl_skip_rules", True)),
                         "bet_scaling": bool(st.session_state.get("pl_bet_scaling", True)),
-                        "saved_at": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                        "saved_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
                     }
                     _save_presets(_presets)
                     st.success(f"Saved '{_preset_name.strip()}'")
