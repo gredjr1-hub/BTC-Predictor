@@ -1347,15 +1347,23 @@ with tab2:
                     history["Model_Version"].isna() | (history["Model_Version"].astype(str).str.strip() == "")
                 ) if "Model_Version" in history.columns else pd.Series(True, index=history.index)
 
+                # Collect all updates first, then write in one batch API call
+                _batch_updates = []
                 for idx, row in history[_missing_ver].iterrows():
                     pred_time = row.get("Prediction_Time")
                     if pd.isna(pred_time):
                         continue
                     _ver_str = _version_for_time(pd.to_datetime(pred_time))
-                    if _ver_str and _sheet2:
-                        _sheet2.update_cell(idx + 2, 13, _ver_str)  # Col 13: Model_Version
+                    if _ver_str:
+                        _batch_updates.append((idx, _ver_str))
                         history.at[idx, "Model_Version"] = _ver_str
                         _bf_filled += 1
+
+                if _batch_updates and _sheet2:
+                    _sheet2.batch_update([
+                        {"range": f"M{idx + 2}", "values": [[_ver_str]]}
+                        for idx, _ver_str in _batch_updates
+                    ])
 
                 _fetch_sheet_records.clear()
                 st.session_state.pop("_sheet_obj", None)
