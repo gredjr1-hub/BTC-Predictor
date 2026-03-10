@@ -2286,7 +2286,7 @@ with tab4:
             st.info("No completed trades with Polymarket odds recorded yet.")
         else:
             # ── Filters ──────────────────────────────────────────────────────
-            fc1, fc2, fc3, fc4 = st.columns(4)
+            fc1, fc2, fc3, fc4, fc5 = st.columns(5)
             _bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
             _odds_bucket = fc1.selectbox("Odds bucket", _bucket_opts, key="t5_bucket")
             _dir_filter = fc2.selectbox("Direction", ["All", "UP", "DOWN"], key="t5_dir")
@@ -2297,6 +2297,15 @@ with tab4:
                 else ["All"]
             )
             _odds_model = fc4.selectbox("Model", _t5_models, key="t5_model")
+            _t5_versions = (
+                ["All"] + sorted(
+                    _odds_df["Model_Version"].dropna().astype(str).unique().tolist(),
+                    key=lambda x: int(x) if x.isdigit() else 0,
+                )
+                if "Model_Version" in _odds_df.columns
+                else ["All"]
+            )
+            _odds_ver = fc5.selectbox("Model Version", _t5_versions, key="t5_version")
 
             _bucket_ranges = {
                 ">50%": (50, 101),
@@ -2316,6 +2325,8 @@ with tab4:
                 _fdf = _fdf[_fdf["Confidence"] >= _conf_min]
             if _odds_model != "All" and "Model" in _fdf.columns:
                 _fdf = _fdf[_fdf["Model"] == _odds_model]
+            if _odds_ver != "All" and "Model_Version" in _fdf.columns:
+                _fdf = _fdf[_fdf["Model_Version"].astype(str) == _odds_ver]
 
             if _fdf.empty:
                 st.warning("No trades match the selected filters.")
