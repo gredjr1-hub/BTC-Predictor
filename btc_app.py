@@ -6,6 +6,7 @@ import ccxt
 import os
 import joblib
 import math
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
@@ -628,27 +629,24 @@ def live_market_and_advanced_stats_fragment(
 def _load_training_stats():
     """Read BTCUSDT_1m_processed.csv and return per-horizon row counts and date ranges."""
     try:
-        df = pd.read_csv("BTCUSDT_1m_processed.csv")
-        ts_col = next(
+        _csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BTCUSDT_1m_processed.csv")
+        df = pd.read_csv(_csv_path)
+        ts_col = "Timestamp" if "Timestamp" in df.columns else next(
             (c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None
         )
         result = {}
         for h in range(1, 6):
-            sub = (
-                df[df["minutes_to_window_end"] == h]
-                if "minutes_to_window_end" in df.columns
-                else df
-            )
-            earliest = latest = None
+            sub = df[df["minutes_to_window_end"] == h] if "minutes_to_window_end" in df.columns else df
+            earliest_str = latest_str = None
             if ts_col and len(sub) > 0:
                 parsed = pd.to_datetime(sub[ts_col], errors="coerce").dropna()
                 if len(parsed) > 0:
-                    earliest = parsed.min()
-                    latest = parsed.max()
-            result[h] = {"rows": len(sub), "earliest": earliest, "latest": latest}
+                    earliest_str = str(parsed.min())
+                    latest_str = str(parsed.max())
+            result[h] = {"rows": int(len(sub)), "earliest": earliest_str, "latest": latest_str}
         return result
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"_error": str(e)}
 
 
 # --- 7. UI Layout (Tabs) ---
@@ -2323,7 +2321,7 @@ with tab5:
     )
 
     # --- Model file metadata ---
-    _mf_path = "btc_5m_rf_model.joblib"
+    _mf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "btc_5m_rf_model.joblib")
     try:
         _mf_mtime = datetime.utcfromtimestamp(os.path.getmtime(_mf_path))
         _mf_size_kb = os.path.getsize(_mf_path) / 1024
@@ -2335,24 +2333,69 @@ with tab5:
         _mf_age_days = None
         _mf_age_str = "unknown"
 
+    # --- Load model_metadata.json if present ---
+    _model_meta = {}
+    try:
+        _meta_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_metadata.json")
+        with open(_meta_path) as _f:
+            _model_meta = json.load(_f)
+    except Exception:
+        pass
+
     # --- Training data stats ---
     _train_stats = _load_training_stats()
-    _total_train_rows = sum(v["rows"] for v in _train_stats.values()) if _train_stats else 0
-    _all_earliests = [v["earliest"] for v in _train_stats.values() if v.get("earliest") is not None]
-    _all_latests = [v["latest"] for v in _train_stats.values() if v.get("latest") is not None]
-    _data_start = min(_all_earliests) if _all_earliests else None
-    _data_end = max(_all_latests) if _all_latests else None
+    if _train_stats.get("_error"):
+        st.warning(f"Could not load training CSV: {_train_stats['_error']}")
+    _valid_stats = {k: v for k, v in _train_stats.items() if k != "_error"}
+    _total_train_rows = sum(v["rows"] for v in _valid_stats.values()) if _valid_stats else 0
+    _all_earliests = [v["earliest"] for v in _valid_stats.values() if v.get("earliest") is not None]
+    _all_latests = [v["latest"] for v in _valid_stats.values() if v.get("latest") is not None]
+    _data_start = pd.to_datetime(min(_all_earliests)) if _all_earliests else None
+    _data_end = pd.to_datetime(max(_all_latests)) if _all_latests else None
+
+    # --- Prefer metadata timestamp; fall back to file mtime ---
+    if _model_meta.get("retrained_at_utc"):
+        _retrain_display = _model_meta["retrained_at_utc"] + " UTC"
+        _retrain_dt = datetime.strptime(_model_meta["retrained_at_utc"], "%Y-%m-%d %H:%M:%S")
+        _mf_age_days = (datetime.utcnow() - _retrain_dt).days
+        _mf_age_str = f"{_mf_age_days}d ago" if _mf_age_days > 0 else "today"
+    else:
+        _retrain_display = _mf_mtime.strftime("%Y-%m-%d %H:%M:%S UTC") if _mf_mtime else "—"
+
+    # --- Fallback to metadata row counts if CSV stats unavailable ---
+    if not _total_train_rows and _model_meta.get("total_rows"):
+        _total_train_rows = _model_meta["total_rows"]
+    if _data_start is None and _model_meta.get("data_start"):
+        _data_start = pd.to_datetime(_model_meta["data_start"])
+    if _data_end is None and _model_meta.get("data_end"):
+        _data_end = pd.to_datetime(_model_meta["data_end"])
 
     # --- Summary bar ---
     _smry_cols = st.columns(4)
     with _smry_cols[0]:
-        st.metric("Last Retrained", _mf_mtime.strftime("%Y-%m-%d") if _mf_mtime else "—", delta=_mf_age_str, delta_color="inverse")
+        st.metric("Last Retrained", _retrain_display, delta=_mf_age_str, delta_color="inverse")
     with _smry_cols[1]:
         st.metric("Training Rows (total)", f"{_total_train_rows:,}" if _total_train_rows else "—")
     with _smry_cols[2]:
-        st.metric("Data From", _data_start.strftime("%Y-%m-%d") if _data_start else "—")
+        st.metric("Data From", _data_start.strftime("%Y-%m-%d") if _data_start is not None else "—")
     with _smry_cols[3]:
-        st.metric("Data To", _data_end.strftime("%Y-%m-%d") if _data_end else "—")
+        st.metric("Data To", _data_end.strftime("%Y-%m-%d") if _data_end is not None else "—")
+
+    # --- Provenance caption ---
+    if _model_meta:
+        _script = _model_meta.get("script", "unknown")
+        _new_rows = _model_meta.get("new_rows_added")
+        _prev_date = _model_meta.get("previous_retrained_at_utc", "—")
+        _parts = [f"Retrained via **{_script}**"]
+        if _new_rows is not None and _new_rows > 0:
+            _parts.append(f"**+{_new_rows:,} new rows** added")
+        elif _new_rows == 0:
+            _parts.append("no new rows added")
+        if _prev_date and _prev_date != "—":
+            _parts.append(f"previous retrain: {_prev_date} UTC")
+        st.caption("  ·  ".join(_parts))
+    else:
+        st.caption("No metadata file found — run a retrain to generate provenance data.")
 
     st.divider()
 
@@ -2363,10 +2406,13 @@ with tab5:
 
     for _hz in range(1, 6):
         _hz_label = f"{_hz}min"
-        _hz_data = _train_stats.get(_hz, {})
+        _hz_data = _valid_stats.get(_hz, {})
         _hz_rows = _hz_data.get("rows", 0)
-        _hz_earliest = _hz_data.get("earliest")
-        _hz_latest = _hz_data.get("latest")
+        _hz_earliest = pd.to_datetime(_hz_data.get("earliest")) if _hz_data.get("earliest") else None
+        _hz_latest = pd.to_datetime(_hz_data.get("latest")) if _hz_data.get("latest") else None
+        # Fallback: use metadata rows_per_horizon if CSV stats missing
+        if not _hz_rows and _model_meta.get("rows_per_horizon"):
+            _hz_rows = _model_meta["rows_per_horizon"].get(str(_hz), 0)
 
         # Prediction history for this horizon
         if _mh_history is not None and len(_mh_history) > 0 and "Model" in _mh_history.columns:

@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import joblib
+import json
+import datetime as _dt
 
 FEATURE_COLS = [
     'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
@@ -49,6 +51,21 @@ def train_production_model(filepath):
     joblib.dump(models, model_filename)
     print(f"\n✅ Saved dict of 5 horizon-specific models to {model_filename}")
     print("  Keys: {1: 1-min-left model, 2: 2-min-left, ..., 5: 5-min-left (boundary)}")
+
+    _meta = {
+        "retrained_at_utc": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "script": "train_model.py",
+        "total_rows": len(df),
+        "rows_per_horizon": {str(h): int((df["minutes_to_window_end"] == h).sum()) for h in range(1, 6)} if "minutes_to_window_end" in df.columns else None,
+        "data_start": str(df.index.min()) if df.index.name == "Timestamp" else None,
+        "data_end":   str(df.index.max()) if df.index.name == "Timestamp" else None,
+        "new_rows_added": None,
+        "previous_total_rows": None,
+        "previous_retrained_at_utc": None,
+    }
+    with open("model_metadata.json", "w") as _f:
+        json.dump(_meta, _f, indent=2)
+    print("📋 Saved model_metadata.json")
 
 if __name__ == "__main__":
     train_production_model("BTCUSDT_1m_processed.csv")

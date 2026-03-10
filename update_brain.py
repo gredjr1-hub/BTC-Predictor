@@ -6,6 +6,8 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 import time
 import os
+import json
+import datetime as _dt
 
 MASTER_FILE = "BTCUSDT_1m_processed.csv"
 MODEL_FILE = "btc_5m_rf_model.joblib"
@@ -86,6 +88,27 @@ def stitch_and_train(new_data):
     
     joblib.dump(model, MODEL_FILE)
     print("✅ Model successfully upgraded and saved!")
+
+    _prev_meta = {}
+    try:
+        with open("model_metadata.json") as _f:
+            _prev_meta = json.load(_f)
+    except Exception:
+        pass
+    _meta = {
+        "retrained_at_utc": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "script": "update_brain.py",
+        "total_rows": len(combined_df),
+        "rows_per_horizon": None,
+        "data_start": str(combined_df.index.min()),
+        "data_end":   str(combined_df.index.max()),
+        "new_rows_added": len(combined_df) - _prev_meta.get("total_rows", len(combined_df)),
+        "previous_total_rows": _prev_meta.get("total_rows"),
+        "previous_retrained_at_utc": _prev_meta.get("retrained_at_utc"),
+    }
+    with open("model_metadata.json", "w") as _f:
+        json.dump(_meta, _f, indent=2)
+    print("📋 Saved model_metadata.json")
 
 if __name__ == "__main__":
     recent_data = fetch_recent_kraken_data(days=7)
