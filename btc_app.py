@@ -1278,7 +1278,7 @@ with tab2:
     if _pending_count > 0:
         history = resolve_pending_trades_in_sheets(history, _sheet2)
 
-    _btn_col1, _btn_col2 = st.columns(2)
+    _btn_col1, _btn_col2, _btn_col3 = st.columns(3)
 
     with _btn_col1:
         if st.button("🔄 Resolve Pending Trades (+ Kraken fallback)", help="Force-resolve using Kraken candles as last resort if Gamma/Pyth unavailable"):
@@ -1312,6 +1312,55 @@ with tab2:
                 st.session_state.pop("_sheet_obj", None)
                 st.session_state.pop("_headers_ensured", None)
             st.success(f"Backfilled PM_Resolution for {_filled} of {_attempted} row(s) attempted.")
+            st.rerun()
+
+    with _btn_col3:
+        if st.button("🏷️ Backfill Model Versions", help="Stamp v0/v1/v2/… on all rows missing a Model_Version, based on when each model was retrained."):
+            with st.spinner("Backfilling Model_Version…"):
+                # Build version timeline from model_history.json
+                _ver_timeline = []  # list of (version_int, cutoff_datetime)
+                try:
+                    _hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_history.json")
+                    with open(_hist_path) as _hf:
+                        _hist_data = json.load(_hf)
+                    for _he in sorted(_hist_data, key=lambda x: x.get("retrained_at_utc", "")):
+                        if _he.get("model_version") and _he.get("retrained_at_utc"):
+                            _ver_timeline.append((
+                                int(_he["model_version"]),
+                                pd.to_datetime(_he["retrained_at_utc"]),
+                            ))
+                except Exception:
+                    _ver_timeline = []
+
+                def _version_for_time(pred_time):
+                    """Return the version string (v0, v1, …) for a given prediction timestamp."""
+                    if not _ver_timeline:
+                        return ""
+                    ver = 0  # pre-history default
+                    for _v, _cutoff in _ver_timeline:
+                        if pred_time >= _cutoff:
+                            ver = _v
+                    return str(ver)
+
+                _bf_filled = 0
+                _missing_ver = (
+                    history["Model_Version"].isna() | (history["Model_Version"].astype(str).str.strip() == "")
+                ) if "Model_Version" in history.columns else pd.Series(True, index=history.index)
+
+                for idx, row in history[_missing_ver].iterrows():
+                    pred_time = row.get("Prediction_Time")
+                    if pd.isna(pred_time):
+                        continue
+                    _ver_str = _version_for_time(pd.to_datetime(pred_time))
+                    if _ver_str and _sheet2:
+                        _sheet2.update_cell(idx + 2, 13, _ver_str)  # Col 13: Model_Version
+                        history.at[idx, "Model_Version"] = _ver_str
+                        _bf_filled += 1
+
+                _fetch_sheet_records.clear()
+                st.session_state.pop("_sheet_obj", None)
+                st.session_state.pop("_headers_ensured", None)
+            st.success(f"Stamped Model_Version on {_bf_filled} row(s).")
             st.rerun()
 
     _tab2_meta = _load_model_metadata()
