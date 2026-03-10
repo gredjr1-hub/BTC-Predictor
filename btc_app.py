@@ -1381,6 +1381,7 @@ with tab4:
             MAX_BET_PCT = 0.05           # 5.0% — hard cap
             HIGH_ODDS_THRESHOLD = 0.65   # market strongly agrees → payout < 1.54x
             MIN_CONF_FOR_HIGH_ODDS = 60.0  # require this confidence to bet into a high-odds market
+            CONTRARIAN_SKIP_THRESHOLD = 0.30  # PM gives <30% to model's direction → skip
 
             balance = STARTING_BALANCE
             trades_log = []
@@ -1388,6 +1389,30 @@ with tab4:
             for _, row in completed_with_odds.iterrows():
                 conf = float(row["Confidence"])
                 odds = float(row["Polymarket_Odds"])
+
+                if _apply_skip_rules and odds < CONTRARIAN_SKIP_THRESHOLD:
+                    # Strongly contrarian — PM strongly disagrees with model's prediction
+                    actual_outcome = row["Outcome"]
+                    if actual_outcome == "Win":
+                        hypothetical_pnl = round(balance * MIN_BET_PCT * (1.0 / odds - 1.0), 2)
+                        skip_label = "⏭️ Skipped Contrarian (would Win)"
+                    else:
+                        hypothetical_pnl = round(-balance * MIN_BET_PCT, 2)
+                        skip_label = "⏭️ Skipped Contrarian (would Loss)"
+                    trades_log.append({
+                        "Time": fmt_et(row["Prediction_Time"], "%m/%d %H:%M %Z"),
+                        "Direction": row["Prediction"],
+                        "Confidence": f"{conf:.1f}%",
+                        "Odds": f"{odds:.3f} ({odds*100:.1f}%)",
+                        "Bet %": "—",
+                        "Bet $": "—",
+                        "Outcome": skip_label,
+                        "P&L": 0,
+                        "What-If P&L": hypothetical_pnl,
+                        "Balance": round(balance, 2),
+                        "bet_amt": 0,
+                    })
+                    continue
 
                 if odds >= HIGH_ODDS_THRESHOLD:
                     # Market is very confident your direction wins → small payout
