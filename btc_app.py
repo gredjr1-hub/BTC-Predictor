@@ -624,14 +624,42 @@ def live_market_and_advanced_stats_fragment(
     st.divider()
 
 
+@st.cache_data(ttl=3600)
+def _load_training_stats():
+    """Read BTCUSDT_1m_processed.csv and return per-horizon row counts and date ranges."""
+    try:
+        df = pd.read_csv("BTCUSDT_1m_processed.csv")
+        ts_col = next(
+            (c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None
+        )
+        result = {}
+        for h in range(1, 6):
+            sub = (
+                df[df["minutes_to_window_end"] == h]
+                if "minutes_to_window_end" in df.columns
+                else df
+            )
+            earliest = latest = None
+            if ts_col and len(sub) > 0:
+                parsed = pd.to_datetime(sub[ts_col], errors="coerce").dropna()
+                if len(parsed) > 0:
+                    earliest = parsed.min()
+                    latest = parsed.max()
+            result[h] = {"rows": len(sub), "earliest": earliest, "latest": latest}
+        return result
+    except Exception:
+        return {}
+
+
 # --- 7. UI Layout (Tabs) ---
 # Reset per-cycle warning flag so the 429 warning shows once per render cycle, not 4×
 st.session_state.pop("_429_warned", None)
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔮 Live Predictor",
     "📊 Analytics & 24h Visualizer",
     "💰 P&L Simulator",
     "📈 Odds vs Performance",
+    "🧠 Model Health",
 ])
 
 with tab1:
@@ -1632,14 +1660,22 @@ with tab3:
             help="Restrict the simulation to trades within this lookback window.",
         )
     with _pl_row1b:
-        _pl_bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _pl_bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+", "Custom"]
         _pl_odds_bucket = st.selectbox(
             "Odds bucket",
             options=_pl_bucket_opts,
             index=_pl_bucket_opts.index(st.session_state.get("pl_odds_bucket", "All")),
             key="pl_odds_bucket",
-            help="Only include trades where Polymarket odds fell in this range. '>50%' filters out contrarian bets (market disagrees with model).",
+            help="Only include trades where Polymarket odds fell in this range. '>50%' filters out contrarian bets (market disagrees with model). 'Custom' lets you enter exact bounds.",
         )
+        if _pl_odds_bucket == "Custom":
+            _cust_col_lo, _cust_col_hi = st.columns(2)
+            with _cust_col_lo:
+                _cust_lo = st.number_input("Lower %", min_value=0, max_value=99, value=int(st.session_state.get("pl_cust_lo_pct", 60)), step=1, key="pl_cust_lo_pct") / 100
+            with _cust_col_hi:
+                _cust_hi = st.number_input("Upper %", min_value=1, max_value=100, value=int(st.session_state.get("pl_cust_hi_pct", 100)), step=1, key="pl_cust_hi_pct") / 100
+        else:
+            _cust_lo, _cust_hi = None, None
     with _pl_row1c:
         _pl_dir_opts = ["All", "UP", "DOWN"]
         _pl_dir_filter = st.selectbox(
@@ -1711,7 +1747,12 @@ with tab3:
             "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
             "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
         }
-        if _pl_odds_bucket != "All":
+        if _pl_odds_bucket == "Custom" and _cust_lo is not None:
+            completed_with_odds = completed_with_odds[
+                (completed_with_odds["Polymarket_Odds"] >= _cust_lo) &
+                (completed_with_odds["Polymarket_Odds"] < _cust_hi)
+            ]
+        elif _pl_odds_bucket != "All":
             _blo, _bhi = _pl_bucket_map[_pl_odds_bucket]
             completed_with_odds = completed_with_odds[
                 (completed_with_odds["Polymarket_Odds"] >= _blo) &
@@ -1738,10 +1779,16 @@ with tab3:
                 _opt_tw_map = {"All Time": None}  # always use all-time window
                 _opt_bkt_map = {
                     "All": None,
-                    ">50%": (0.50, 1.01),
-                    "<50%": (0.0, 0.50),
+                    ">50%": (0.50, 1.01), "<50%": (0.00, 0.50),
                     "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
                     "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
+                    # Fine-grained 5% slices
+                    "55–65%": (0.55, 0.65), "60–65%": (0.60, 0.65), "65–70%": (0.65, 0.70),
+                    "65–75%": (0.65, 0.75), "70–75%": (0.70, 0.75), "75–80%": (0.75, 0.80),
+                    "75–85%": (0.75, 0.85), "80–85%": (0.80, 0.85), "85–90%": (0.85, 0.90),
+                    # Broad upper-tier ranges
+                    "≥60%": (0.60, 1.01), "≥65%": (0.65, 1.01), "≥70%": (0.70, 1.01),
+                    "≥75%": (0.75, 1.01), "≥80%": (0.80, 1.01),
                 }
                 _opt_dirs = ["All", "UP", "DOWN"]
                 _opt_models = (
@@ -2266,3 +2313,142 @@ with tab4:
                     st.markdown("")
             else:
                 st.info("Not enough data yet to surface meaningful trends (need ≥10 completed trades with Polymarket odds).")
+
+with tab5:
+    st.markdown("### 🧠 Model Health")
+    st.markdown(
+        "Shows training data coverage, prediction accuracy, and performance trends for each of the "
+        "5 horizon models (1min–5min). Each model predicts BTC direction with a different amount "
+        "of time remaining before the 5-minute window closes."
+    )
+
+    # --- Model file metadata ---
+    _mf_path = "btc_5m_rf_model.joblib"
+    try:
+        _mf_mtime = datetime.utcfromtimestamp(os.path.getmtime(_mf_path))
+        _mf_size_kb = os.path.getsize(_mf_path) / 1024
+        _mf_age_days = (datetime.utcnow() - _mf_mtime).days
+        _mf_age_str = f"{_mf_age_days}d ago" if _mf_age_days > 0 else "today"
+    except OSError:
+        _mf_mtime = None
+        _mf_size_kb = 0
+        _mf_age_days = None
+        _mf_age_str = "unknown"
+
+    # --- Training data stats ---
+    _train_stats = _load_training_stats()
+    _total_train_rows = sum(v["rows"] for v in _train_stats.values()) if _train_stats else 0
+    _all_earliests = [v["earliest"] for v in _train_stats.values() if v.get("earliest") is not None]
+    _all_latests = [v["latest"] for v in _train_stats.values() if v.get("latest") is not None]
+    _data_start = min(_all_earliests) if _all_earliests else None
+    _data_end = max(_all_latests) if _all_latests else None
+
+    # --- Summary bar ---
+    _smry_cols = st.columns(4)
+    with _smry_cols[0]:
+        st.metric("Last Retrained", _mf_mtime.strftime("%Y-%m-%d") if _mf_mtime else "—", delta=_mf_age_str, delta_color="inverse")
+    with _smry_cols[1]:
+        st.metric("Training Rows (total)", f"{_total_train_rows:,}" if _total_train_rows else "—")
+    with _smry_cols[2]:
+        st.metric("Data From", _data_start.strftime("%Y-%m-%d") if _data_start else "—")
+    with _smry_cols[3]:
+        st.metric("Data To", _data_end.strftime("%Y-%m-%d") if _data_end else "—")
+
+    st.divider()
+
+    # --- Per-horizon model cards ---
+    _mh_history, _ = load_history_from_sheets()
+    _now_utc = datetime.utcnow()
+    _30d_cutoff = _now_utc - timedelta(days=30)
+
+    for _hz in range(1, 6):
+        _hz_label = f"{_hz}min"
+        _hz_data = _train_stats.get(_hz, {})
+        _hz_rows = _hz_data.get("rows", 0)
+        _hz_earliest = _hz_data.get("earliest")
+        _hz_latest = _hz_data.get("latest")
+
+        # Prediction history for this horizon
+        if _mh_history is not None and len(_mh_history) > 0 and "Model" in _mh_history.columns:
+            _hz_hist = _mh_history[
+                (_mh_history["Model"] == _hz_label) &
+                (_mh_history["Outcome"].isin(["Win", "Loss"]))
+            ].copy()
+        else:
+            _hz_hist = pd.DataFrame()
+
+        _n_preds = len(_hz_hist)
+
+        # All-time win rate
+        if _n_preds >= 5:
+            _wr_all = (_hz_hist["Outcome"] == "Win").mean() * 100
+        else:
+            _wr_all = None
+
+        # Recent win rate (last 30 days)
+        if _mh_history is not None and "Prediction_Time" in _hz_hist.columns and _n_preds >= 5:
+            _hz_recent = _hz_hist[pd.to_datetime(_hz_hist["Prediction_Time"], errors="coerce") >= _30d_cutoff]
+            _wr_recent = (_hz_recent["Outcome"] == "Win").mean() * 100 if len(_hz_recent) >= 5 else None
+        else:
+            _wr_recent = None
+
+        # Performance delta (pp)
+        _delta_pp = (_wr_recent - _wr_all) if (_wr_all is not None and _wr_recent is not None) else None
+
+        # Status badge
+        if _mf_age_days is None:
+            _status = "⚠️ Monitor"
+        elif (
+            _mf_age_days > 30
+            or (_wr_recent is not None and _wr_recent < 45)
+            or (_delta_pp is not None and _delta_pp < -8)
+        ):
+            _status = "🔴 Retrain recommended"
+        elif (
+            _mf_age_days > 14
+            or (_delta_pp is not None and _delta_pp < -4)
+        ):
+            _status = "⚠️ Monitor"
+        else:
+            _status = "✅ Healthy"
+
+        with st.expander(f"**{_hz_label} model** — {_status}", expanded=True):
+            _card_cols = st.columns(5)
+            with _card_cols[0]:
+                st.metric("Training rows", f"{_hz_rows:,}" if _hz_rows else "—")
+            with _card_cols[1]:
+                st.metric("Predictions logged", str(_n_preds) if _n_preds else "—")
+            with _card_cols[2]:
+                st.metric(
+                    "All-time win rate",
+                    f"{_wr_all:.1f}%" if _wr_all is not None else "< 5 trades",
+                )
+            with _card_cols[3]:
+                if _wr_recent is not None:
+                    _delta_label = f"{_delta_pp:+.1f} pp vs all-time" if _delta_pp is not None else None
+                    st.metric("Recent win rate (30d)", f"{_wr_recent:.1f}%", delta=_delta_label)
+                else:
+                    st.metric("Recent win rate (30d)", "< 5 trades")
+            with _card_cols[4]:
+                _coverage = ""
+                if _hz_earliest and _hz_latest:
+                    _coverage = f"{_hz_earliest.strftime('%Y-%m-%d')} → {_hz_latest.strftime('%Y-%m-%d')}"
+                st.metric("Training data span", _coverage if _coverage else "—")
+
+    st.divider()
+
+    # --- Retraining guidance ---
+    st.markdown("#### Retraining Guidance")
+    st.info(
+        "**How often should these models be retrained?**\n\n"
+        "Random Forest models trained on short-term BTC technical indicators (RSI, MACD, EMA, Bollinger Bands) "
+        "typically degrade within **2–6 weeks** as market regimes shift. "
+        "Volatility regime changes — such as post-halving periods, macro shocks, or sustained trending markets — "
+        "can accelerate degradation significantly.\n\n"
+        "**Recommended cadence:** Retrain every **2–4 weeks**, or immediately when:\n"
+        "- Rolling 7-day accuracy drops >5 percentage points below your all-time baseline\n"
+        "- A sustained new volatility regime begins (e.g. BTC breaks a major level with high volume)\n"
+        "- Model age exceeds 30 days\n\n"
+        "**To retrain:** Run `python update_brain.py` from the BTCPredictor directory. "
+        "This fetches the latest Kraken 1-min candles, stitches them to the existing dataset, and retrains all 5 horizon models."
+    )
