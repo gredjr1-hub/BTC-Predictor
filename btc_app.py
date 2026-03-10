@@ -3102,7 +3102,8 @@ with tab6:
             _at_cutoff = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
             _at_chart_data = [t for t in _at_chart_data if t["Trade_Time"] >= _at_cutoff]
 
-        # ── Shared data extraction ────────────────────────────────────────────
+        # ── Shared data extraction (skip rows with zero/missing price) ────────
+        _at_chart_data = [t for t in _at_chart_data if t.get("Price", 0)]
         _at_times  = [t["Trade_Time"]      for t in _at_chart_data]
         _at_dirs   = [t["Direction"]       for t in _at_chart_data]
         _at_confs  = [t["Confidence"]      for t in _at_chart_data]
