@@ -67,5 +67,25 @@ def train_production_model(filepath):
         json.dump(_meta, _f, indent=2)
     print("📋 Saved model_metadata.json")
 
+    # Append to history log
+    _hist_path = "model_history.json"
+    _hist_entry = {
+        "retrained_at_utc": _meta["retrained_at_utc"],
+        "script": _meta["script"],
+        "total_rows": _meta["total_rows"],
+        "new_rows_added": None,
+        "data_start": _meta["data_start"],
+        "data_end": _meta["data_end"],
+    }
+    try:
+        with open(_hist_path) as _f:
+            _hist = json.load(_f)
+    except Exception:
+        _hist = []
+    _hist.append(_hist_entry)
+    with open(_hist_path, "w") as _f:
+        json.dump(_hist, _f, indent=2)
+    print("📋 Appended to model_history.json")
+
 if __name__ == "__main__":
     train_production_model("BTCUSDT_1m_processed.csv")

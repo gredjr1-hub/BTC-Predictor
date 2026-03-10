@@ -110,6 +110,26 @@ def stitch_and_train(new_data):
         json.dump(_meta, _f, indent=2)
     print("📋 Saved model_metadata.json")
 
+    # Append to history log
+    _hist_path = "model_history.json"
+    _hist_entry = {
+        "retrained_at_utc": _meta["retrained_at_utc"],
+        "script": _meta["script"],
+        "total_rows": _meta["total_rows"],
+        "new_rows_added": _meta["new_rows_added"],
+        "data_start": _meta["data_start"],
+        "data_end": _meta["data_end"],
+    }
+    try:
+        with open(_hist_path) as _f:
+            _hist = json.load(_f)
+    except Exception:
+        _hist = []
+    _hist.append(_hist_entry)
+    with open(_hist_path, "w") as _f:
+        json.dump(_hist, _f, indent=2)
+    print("📋 Appended to model_history.json")
+
 if __name__ == "__main__":
     recent_data = fetch_recent_kraken_data(days=7)
     processed_recent_data = build_features(recent_data)

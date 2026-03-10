@@ -2342,6 +2342,36 @@ with tab5:
     except Exception:
         pass
 
+    # --- Update history ---
+    _model_history = []
+    try:
+        _hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_history.json")
+        with open(_hist_path) as _f:
+            _model_history = json.load(_f)
+    except Exception:
+        pass
+
+    # Bootstrap from metadata if history file is absent but metadata exists
+    if not _model_history and _model_meta:
+        if _model_meta.get("retrained_at_utc"):
+            _model_history = [{
+                "retrained_at_utc": _model_meta["retrained_at_utc"],
+                "script": _model_meta.get("script", "—"),
+                "total_rows": _model_meta.get("total_rows"),
+                "new_rows_added": _model_meta.get("new_rows_added"),
+                "data_start": _model_meta.get("data_start"),
+                "data_end": _model_meta.get("data_end"),
+            }]
+            if _model_meta.get("previous_retrained_at_utc") and _model_meta["previous_retrained_at_utc"] != "—":
+                _model_history.insert(0, {
+                    "retrained_at_utc": _model_meta["previous_retrained_at_utc"],
+                    "script": "—",
+                    "total_rows": _model_meta.get("previous_total_rows"),
+                    "new_rows_added": None,
+                    "data_start": None,
+                    "data_end": None,
+                })
+
     # --- Training data stats ---
     _train_stats = _load_training_stats()
     _csv_err = _train_stats.get("_error")
@@ -2499,3 +2529,24 @@ with tab5:
         "**To retrain:** Run `python update_brain.py` from the BTCPredictor directory. "
         "This fetches the latest Kraken 1-min candles, stitches them to the existing dataset, and retrains all 5 horizon models."
     )
+
+    st.divider()
+    with st.expander("📋 Update History", expanded=False):
+        if _model_history:
+            _hist_rows = []
+            for _e in reversed(_model_history):  # newest first
+                _hist_rows.append({
+                    "Date / Time (UTC)": _e.get("retrained_at_utc", "—"),
+                    "Script": _e.get("script", "—"),
+                    "Total Rows": f"{_e['total_rows']:,}" if _e.get("total_rows") else "—",
+                    "New Rows": f"+{_e['new_rows_added']:,}" if _e.get("new_rows_added") else "—",
+                    "Data Start": str(_e["data_start"])[:10] if _e.get("data_start") else "—",
+                    "Data End":   str(_e["data_end"])[:10]   if _e.get("data_end")   else "—",
+                })
+            st.dataframe(
+                pd.DataFrame(_hist_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.caption("No update history recorded yet. Run train_model.py or update_brain.py to begin tracking.")
