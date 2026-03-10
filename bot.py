@@ -98,8 +98,8 @@ def grade_trades(sheet, live_data):
                 outcome = 'Win' if pm_resolved == prediction else 'Loss'
                 ref_raw = row.get('PM_Strike_Price') or row.get('Window_Start_Price') or row.get('Entry_Price')
                 close_price = round(float(ref_raw), 2) if ref_raw else 0.0
-                sheet.update_cell(i + 2, 6, close_price)
-                sheet.update_cell(i + 2, 7, outcome)
+                sheet.update_cell(i + 2, 7, close_price)   # Col 7: Close_Price
+                sheet.update_cell(i + 2, 8, outcome)        # Col 8: Outcome
                 continue
 
             # --- Fall back to Kraken candles ---
@@ -113,8 +113,8 @@ def grade_trades(sheet, live_data):
                     outcome = 'Win' if (prediction == 'UP' and actual_close > entry) or (prediction == 'DOWN' and actual_close < entry) else 'Loss'
 
                     # Update Google Sheet (i+2 accounts for 0-index and header row)
-                    sheet.update_cell(i + 2, 6, round(actual_close, 2))
-                    sheet.update_cell(i + 2, 7, outcome)
+                    sheet.update_cell(i + 2, 7, round(actual_close, 2))  # Col 7: Close_Price
+                    sheet.update_cell(i + 2, 8, outcome)                  # Col 8: Outcome
 
 # --- 4. Main Execution ---
 if __name__ == "__main__":
@@ -130,27 +130,43 @@ if __name__ == "__main__":
     # 2. Predict the future
     print("Loading AI Brain...")
     model = joblib.load("btc_5m_rf_model.joblib")
-    
+
+    # Read model version from metadata
+    _model_ver = ""
+    try:
+        with open("model_metadata.json") as _mf:
+            _bot_meta = json.load(_mf)
+            _model_ver = str(_bot_meta.get("model_version", "")) if _bot_meta.get("model_version") else ""
+    except Exception:
+        pass
+
     current_state = live_data.iloc[-1:]
     current_price = current_state['Close'].values[0]
     current_time = current_state.index[0]
-    
+
     prediction_val = model.predict(current_state)[0]
     probs = model.predict_proba(current_state)[0]
-    
+
     direction = "UP" if prediction_val == 1 else "DOWN"
     conf = probs[1] if prediction_val == 1 else probs[0]
-    
+
     # 3. Save to Google Sheets
+    # Columns must match _EXPECTED_HEADERS in btc_app.py (13 cols)
     new_row = [
-        str(current_time),
-        float(current_price),
-        direction,
-        round(conf * 100, 2),
-        str(current_time + timedelta(minutes=5)),
-        "", # Close_Price (Blank until graded)
-        "Pending" # Outcome
+        str(current_time),              # Col 1:  Prediction_Time
+        float(current_price),           # Col 2:  Entry_Price
+        "",                             # Col 3:  Window_Start_Price (not available in bot)
+        direction,                      # Col 4:  Prediction
+        round(conf * 100, 2),           # Col 5:  Confidence
+        str(current_time + timedelta(minutes=5)),  # Col 6: Target_Time
+        "",                             # Col 7:  Close_Price (blank until graded)
+        "Pending",                      # Col 8:  Outcome
+        "",                             # Col 9:  Polymarket_Odds (not available in bot)
+        "",                             # Col 10: PM_Resolution
+        "",                             # Col 11: Seconds_Left
+        "",                             # Col 12: Model
+        _model_ver,                     # Col 13: Model_Version
     ]
-    
+
     sheet.append_row(new_row)
     print(f"[{datetime.utcnow()}] Successfully appended {direction} prediction to Google Sheets. Going back to sleep.")
