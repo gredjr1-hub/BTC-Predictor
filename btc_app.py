@@ -2984,7 +2984,7 @@ with tab6:
                 _at_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
                 _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-                if _at_direction == "UP":
+                if _at_direction == "BUY":
                     _at_cash_used = round(st.session_state.at_cash * _at_pct, 2)
                     if _at_cash_used < 1.0:
                         st.caption("No trade: insufficient cash")
@@ -3085,48 +3085,108 @@ with tab6:
     _at_m3.metric("BTC Held", f"{st.session_state.at_btc:.6f} BTC" if st.session_state.at_btc else "—")
     _at_m4.metric("BTC Value", f"${_at_btc_value:,.2f}")
 
-    # ── Portfolio value chart ──────────────────────────────────────────────────
+    # ── Portfolio value charts ─────────────────────────────────────────────────
     if st.session_state.at_trade_log:
-        _at_chart_data = list(reversed(st.session_state.at_trade_log))
-        _at_times = [t["Trade_Time"] for t in _at_chart_data]
-        _at_pvals = [t["Portfolio_Value"] for t in _at_chart_data]
-        _at_dirs  = [t["Direction"] for t in _at_chart_data]
-        _at_confs = [t["Confidence"] for t in _at_chart_data]
-        _at_prices = [t["Price"] for t in _at_chart_data]
-
-        _at_hover = [
-            f"{_at_times[i]}<br>{_at_dirs[i]} | Conf: {_at_confs[i]:.1f}%<br>"
-            f"Price: ${_at_prices[i]:,.2f}<br>Portfolio: ${_at_pvals[i]:,.2f}"
-            for i in range(len(_at_chart_data))
-        ]
-        _at_colors = ["#00c896" if d == "BUY" else "#ff4b4b" for d in _at_dirs]
-        _at_symbols = ["triangle-up" if d == "BUY" else "triangle-down" for d in _at_dirs]
-
-        _at_fig = go.Figure()
-        _at_fig.add_trace(go.Scatter(
-            x=_at_times, y=_at_pvals,
-            mode="lines+markers",
-            line=dict(color="#7c8cf8", width=2),
-            marker=dict(color=_at_colors, symbol=_at_symbols, size=12,
-                        line=dict(width=1, color="white")),
-            hovertext=_at_hover,
-            hoverinfo="text",
-            name="Portfolio Value",
-        ))
-        _at_fig.add_hline(
-            y=1000.0, line_dash="dot", line_color="gray",
-            annotation_text="Start $1,000", annotation_position="bottom right",
+        # Time-window toggle
+        _at_window = st.radio(
+            "Chart window", ["All time", "Last hour"],
+            horizontal=True, key="at_window"
         )
-        _at_fig.update_layout(
-            title="Portfolio Value Over Trades",
-            xaxis_title="Trade Time (UTC)",
-            yaxis_title="Portfolio Value ($)",
-            template="plotly_dark",
-            height=350,
-            margin=dict(l=0, r=0, t=40, b=0),
-            showlegend=False,
-        )
-        st.plotly_chart(_at_fig, use_container_width=True)
+        _at_chart_data = list(reversed(st.session_state.at_trade_log))  # chronological
+        if _at_window == "Last hour":
+            _at_cutoff = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            _at_chart_data = [t for t in _at_chart_data if t["Trade_Time"] >= _at_cutoff]
+
+        # ── Shared data extraction ────────────────────────────────────────────
+        _at_times  = [t["Trade_Time"]      for t in _at_chart_data]
+        _at_dirs   = [t["Direction"]       for t in _at_chart_data]
+        _at_confs  = [t["Confidence"]      for t in _at_chart_data]
+        _at_prices = [t["Price"]           for t in _at_chart_data]
+        _at_pvals  = [t["Portfolio_Value"] for t in _at_chart_data]
+
+        # ── Hold BTC benchmark ────────────────────────────────────────────────
+        _at_hold_vals = []
+        if _at_prices:
+            _at_hold_btc = 1000.0 / _at_prices[0]
+            _at_hold_vals = [round(_at_hold_btc * p, 2) for p in _at_prices]
+
+        # ── Whaling simulation ────────────────────────────────────────────────
+        _at_whale_vals = []
+        if _at_prices:
+            _wh_btc  = 500.0 / _at_prices[0]
+            _wh_cash = 500.0
+            for d, p in zip(_at_dirs, _at_prices):
+                if d == "BUY" and _wh_cash > 0:
+                    _wh_btc  += _wh_cash / p
+                    _wh_cash  = 0.0
+                elif d == "SELL" and _wh_btc > 0:
+                    _wh_cash += _wh_btc * p
+                    _wh_btc   = 0.0
+                _at_whale_vals.append(round(_wh_cash + _wh_btc * p, 2))
+
+        # ── DCA simulation ────────────────────────────────────────────────────
+        _at_dca_vals = []
+        _AT_DCA_AMOUNT = 500.0 * 0.025  # $12.50
+        if _at_prices:
+            _dc_btc  = 500.0 / _at_prices[0]
+            _dc_cash = 500.0
+            for d, p in zip(_at_dirs, _at_prices):
+                if d == "BUY" and _dc_cash >= _AT_DCA_AMOUNT:
+                    _dc_btc  += _AT_DCA_AMOUNT / p
+                    _dc_cash -= _AT_DCA_AMOUNT
+                _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
+
+        # ── Chart helper ──────────────────────────────────────────────────────
+        def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals):
+            colors  = ["#00c896" if d == "BUY" else "#ff4b4b" for d in dirs]
+            symbols = ["triangle-up" if d == "BUY" else "triangle-down" for d in dirs]
+            hover = [
+                f"{times[i]}<br>{dirs[i]} | Conf: {confs[i]:.1f}%<br>"
+                f"Price: ${prices[i]:,.2f}<br>Portfolio: ${pvals[i]:,.2f}"
+                for i in range(len(pvals))
+            ]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=times, y=pvals, mode="lines+markers",
+                line=dict(color="#7c8cf8", width=2),
+                marker=dict(color=colors, symbol=symbols, size=12,
+                            line=dict(width=1, color="white")),
+                hovertext=hover, hoverinfo="text", name="Portfolio Value",
+            ))
+            if hold_vals:
+                fig.add_trace(go.Scatter(
+                    x=times, y=hold_vals, mode="lines",
+                    line=dict(color="#f0c040", width=1, dash="dot"),
+                    name="Hold BTC", hoverinfo="skip",
+                ))
+            fig.add_hline(y=1000.0, line_dash="dot", line_color="gray",
+                          annotation_text="Start $1,000", annotation_position="bottom right")
+            fig.update_layout(
+                title=title, xaxis_title="Trade Time (UTC)",
+                yaxis_title="Portfolio Value ($)", template="plotly_dark",
+                height=350, margin=dict(l=0, r=0, t=40, b=0), showlegend=True,
+            )
+            return fig
+
+        if _at_chart_data:
+            # Chart 1: Buy and Sell (actual bot)
+            st.plotly_chart(
+                _make_at_chart("Buy and Sell", _at_pvals, _at_times, _at_dirs,
+                               _at_confs, _at_prices, _at_hold_vals),
+                use_container_width=True,
+            )
+            # Chart 2: Whaling
+            st.plotly_chart(
+                _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
+                               _at_confs, _at_prices, _at_hold_vals),
+                use_container_width=True,
+            )
+            # Chart 3: DCA
+            st.plotly_chart(
+                _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
+                               _at_confs, _at_prices, _at_hold_vals),
+                use_container_width=True,
+            )
 
     # ── Trade history ─────────────────────────────────────────────────────────
     if st.session_state.at_trade_log:
