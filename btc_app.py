@@ -3097,16 +3097,7 @@ with tab6:
         except Exception as _at_trade_err:
             st.warning(f"Auto trader error: {_at_trade_err}")
 
-    # ── Portfolio metrics ─────────────────────────────────────────────────────
     _at_current_price = get_live_ticker_price() or (float(get_live_prediction_data().iloc[-1]["Close"]) if True else 0)
-    _at_btc_value = st.session_state.at_btc * _at_current_price if st.session_state.at_btc else 0
-    _at_total = st.session_state.at_cash + _at_btc_value
-
-    _at_m1, _at_m2, _at_m3, _at_m4 = st.columns(4)
-    _at_m1.metric("Portfolio Value", f"${_at_total:,.2f}", delta=f"${_at_total - 1000.0:+,.2f}")
-    _at_m2.metric("Cash", f"${st.session_state.at_cash:,.2f}")
-    _at_m3.metric("BTC Held", f"{st.session_state.at_btc:.6f} BTC" if st.session_state.at_btc else "—")
-    _at_m4.metric("BTC Value", f"${_at_btc_value:,.2f}")
 
     # ── Portfolio value charts ─────────────────────────────────────────────────
     if st.session_state.at_trade_log:
@@ -3122,6 +3113,7 @@ with tab6:
 
         # ── Shared data extraction (skip rows with zero/missing price) ────────
         _at_chart_data = [t for t in _at_chart_data if t.get("Price", 0)]
+        _at_chart_data = [t for t in _at_chart_data if t.get("Confidence", 0) >= _at_threshold]
         _at_times  = [t["Trade_Time"]      for t in _at_chart_data]
         _at_dirs   = [t["Direction"]       for t in _at_chart_data]
         _at_confs  = [t["Confidence"]      for t in _at_chart_data]
