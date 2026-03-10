@@ -1550,7 +1550,7 @@ with tab2:
     else:
         st.info("No predictions found in the Google Sheet yet. Run a prediction to start tracking!")
 
-def _quick_pl_sim(trades_df, apply_skip_rules=True):
+def _quick_pl_sim(trades_df, apply_skip_rules=True, apply_bet_scaling=True):
     """Lightweight P&L simulation used by the auto-optimizer.
     Returns (final_balance, n_trades_executed). Mirrors the main tab4 logic exactly.
     """
@@ -1574,7 +1574,7 @@ def _quick_pl_sim(trades_df, apply_skip_rules=True):
                 continue
             if odds >= HIGH_ODDS_THRESHOLD and conf < MIN_CONF_FOR_HIGH_ODDS:
                 continue
-        if odds < 0.5:
+        if odds < 0.5 and apply_bet_scaling:
             bet_pct = min(MAX_BET_PCT, MIN_BET_PCT + (conf - 50) / 100 * MAX_BET_PCT)
         else:
             bet_pct = MIN_BET_PCT
@@ -1614,6 +1614,12 @@ with tab3:
         value=True,
         help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
              "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
+    )
+    _apply_bet_scaling = st.toggle(
+        "Apply bet scaling (contrarian bets scale 2.5–5% by confidence)",
+        value=True,
+        help="When ON, contrarian bets (market odds <50%) scale from 2.5% to 5% based on AI confidence. "
+             "Toggle OFF to apply flat 2.5% to every bet for clean P&L comparison.",
     )
     _pl_row1a, _pl_row1b, _pl_row1c = st.columns(3)
     with _pl_row1a:
@@ -1729,7 +1735,7 @@ with tab3:
                     (sim_history["Polymarket_Odds"] > 0)
                 ].copy().sort_values("Prediction_Time")
 
-                _opt_tw_map = {"All Time": None, "Past 24h": 24, "Past 12h": 12, "Past 1h": 1}
+                _opt_tw_map = {"All Time": None}  # always use all-time window
                 _opt_bkt_map = {
                     "All": None,
                     ">50%": (0.50, 1.01),
@@ -1886,7 +1892,7 @@ with tab3:
                         continue
                     bet_pct = MIN_BET_PCT   # even with high conf, don't oversize a small-payout bet
 
-                elif odds < 0.5:
+                elif odds < 0.5 and _apply_bet_scaling:
                     # Contrarian — market disagrees, payout is large → scale up with confidence
                     # Linear scale: 2.5% at conf=50 → 5% at conf=100
                     bet_pct = min(MAX_BET_PCT, MIN_BET_PCT + (conf - 50) / 100 * MAX_BET_PCT)
