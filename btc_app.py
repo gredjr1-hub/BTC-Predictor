@@ -1015,17 +1015,38 @@ with tab1:
     elif st.session_state.btc_tick_history:
         _btc_strike = st.session_state.btc_tick_history[0]["price"]
 
+    # Load open bets for the current window (Pending outcome, matching target time)
+    _t1_all_history, _ = load_history_from_sheets()
+    _win_start_dt = _t1_current_window - timedelta(minutes=5)
+    _open_bets = pd.DataFrame()
+    if not _t1_all_history.empty and "Outcome" in _t1_all_history.columns:
+        _ob_mask = _t1_all_history["Outcome"] == "Pending"
+        if "Target_Time" in _t1_all_history.columns:
+            # Match bets whose target window is the current window (within 60s tolerance)
+            def _target_matches_window(tt):
+                try:
+                    tt_dt = pd.to_datetime(tt)
+                    if tt_dt.tzinfo is not None:
+                        tt_dt = tt_dt.tz_localize(None)
+                    return abs((tt_dt - _t1_current_window).total_seconds()) < 60
+                except Exception:
+                    return False
+            _ob_mask = _ob_mask & _t1_all_history["Target_Time"].apply(_target_matches_window)
+        _open_bets = _t1_all_history[_ob_mask].copy()
+
     if st.session_state.btc_tick_history:
         import plotly.graph_objects as _go_btc
         _btc_hist = st.session_state.btc_tick_history
         _btc_times = [h["ts"] for h in _btc_hist]
         _btc_prices = [h["price"] for h in _btc_hist]
 
-        # Tight y-axis: include strike in range, add padding
+        # Tight y-axis: include strike + bet entry prices in range
         _btc_all_vals = _btc_prices + ([_btc_strike] if _btc_strike else [])
+        if not _open_bets.empty and "Entry_Price" in _open_bets.columns:
+            _btc_all_vals += [float(p) for p in _open_bets["Entry_Price"].dropna()]
         _btc_lo = min(_btc_all_vals)
         _btc_hi = max(_btc_all_vals)
-        _btc_pad = max((_btc_hi - _btc_lo) * 0.35, 15)  # at least $15, 35% of spread
+        _btc_pad = max((_btc_hi - _btc_lo) * 0.35, 15)
 
         # Colour: green if current price is above strike, red if below
         _btc_above = (_btc_strike is None) or (_btc_prices[-1] >= _btc_strike)
@@ -1055,10 +1076,61 @@ with tab1:
                 annotation_font_size=12,
             )
 
-        # Pin x-axis to the full 5-minute window so the chart doesn't stretch oddly
-        _win_start_dt = _t1_current_window - timedelta(minutes=5)
+        # ── Overlay open bet entry points ────────────────────────────────────
+        if not _open_bets.empty:
+            for _, _ob_row in _open_bets.iterrows():
+                try:
+                    _ob_pred_time = pd.to_datetime(_ob_row.get("Prediction_Time"))
+                    if _ob_pred_time.tzinfo is not None:
+                        _ob_pred_time = _ob_pred_time.tz_localize(None)
+                    _ob_entry = float(_ob_row.get("Entry_Price", 0) or 0)
+                    _ob_ref = float(_ob_row.get("Window_Start_Price") or _ob_entry or 0)
+                    _ob_dir = _ob_row.get("Prediction", "UP")
+                    _ob_conf = _ob_row.get("Confidence", "")
+                    _ob_odds = _ob_row.get("Polymarket_Odds", "")
+
+                    # Current win/loss based on live price vs reference
+                    if _t1_live_price_val and _ob_ref:
+                        _ob_winning = (
+                            float(_t1_live_price_val) > _ob_ref if _ob_dir == "UP"
+                            else float(_t1_live_price_val) < _ob_ref
+                        )
+                    else:
+                        _ob_winning = None
+
+                    _ob_marker_color = (
+                        "lime" if _ob_winning is True
+                        else "tomato" if _ob_winning is False
+                        else "gold"
+                    )
+                    _ob_symbol = "triangle-up" if _ob_dir == "UP" else "triangle-down"
+
+                    _ob_hover = (
+                        f"{_ob_dir} @ ${_ob_entry:,.2f}<br>"
+                        f"Conf: {_ob_conf}%  Odds: {float(_ob_odds)*100:.1f}%"
+                        if _ob_odds else f"{_ob_dir} @ ${_ob_entry:,.2f}<br>Conf: {_ob_conf}%"
+                    )
+
+                    _fig_btc.add_trace(_go_btc.Scatter(
+                        x=[_ob_pred_time],
+                        y=[_ob_entry],
+                        mode="markers",
+                        marker=dict(
+                            symbol=_ob_symbol,
+                            size=16,
+                            color=_ob_marker_color,
+                            line=dict(width=1.5, color="white"),
+                        ),
+                        name=f"{_ob_dir} bet",
+                        hovertext=_ob_hover,
+                        hoverinfo="text",
+                        showlegend=False,
+                    ))
+                except Exception:
+                    pass
+
         _fig_btc.update_layout(
-            height=300,
+            height=320,
             margin=dict(l=0, r=0, t=10, b=0),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
@@ -1085,6 +1157,65 @@ with tab1:
         st.caption(f"{_btc_n} tick{'s' if _btc_n != 1 else ''} this window · {_btc_rm}m {_btc_rs:02d}s remaining · refreshes every 10s")
     else:
         st.caption("Collecting price ticks… chart appears after the first reading.")
+
+    # ── Current Open Bets ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 🎰 Current Open Bets")
+
+    if _open_bets.empty:
+        st.info("No open bets for the current window.")
+    else:
+        for _, _ob_row in _open_bets.iterrows():
+            try:
+                _ob_dir = _ob_row.get("Prediction", "?")
+                _ob_dir_icon = "⬆️" if _ob_dir == "UP" else "⬇️"
+                _ob_conf = _ob_row.get("Confidence", "")
+                _ob_entry = float(_ob_row.get("Entry_Price", 0) or 0)
+                _ob_ref = float(_ob_row.get("Window_Start_Price") or _ob_entry or 0)
+                _ob_target = fmt_et(_ob_row.get("Target_Time"), "%H:%M %Z") or "N/A"
+                _ob_pred_t = fmt_et(_ob_row.get("Prediction_Time"), "%H:%M:%S %Z") or "N/A"
+                _ob_model = _ob_row.get("Model", "")
+
+                # Odds at time of prediction
+                _ob_odds_raw = _ob_row.get("Polymarket_Odds")
+                try:
+                    _ob_odds_f = float(_ob_odds_raw)
+                    _ob_odds_str = f"{_ob_odds_f*100:.1f}%  (payout {1/_ob_odds_f:.2f}x)"
+                except (TypeError, ValueError, ZeroDivisionError):
+                    _ob_odds_str = "—"
+
+                # Live P&L vs reference price
+                if _t1_live_price_val and _ob_ref:
+                    _ob_live = float(_t1_live_price_val)
+                    _ob_diff = _ob_live - _ob_ref if _ob_dir == "UP" else _ob_ref - _ob_live
+                    _ob_diff_pct = (_ob_diff / _ob_ref) * 100
+                    _ob_winning = _ob_diff > 0
+                    _ob_status_icon = "🟢" if _ob_winning else "🔴"
+                    _ob_pnl_str = f"{_ob_status_icon} ${abs(_ob_diff):,.2f} ({_ob_diff_pct:+.3f}%)"
+                else:
+                    _ob_pnl_str = "—"
+                    _ob_winning = None
+
+                # Payout string
+                try:
+                    _ob_payout_str = f"{1/float(_ob_odds_raw):.2f}x"
+                except (TypeError, ValueError, ZeroDivisionError):
+                    _ob_payout_str = "—"
+
+                with st.container(border=True):
+                    _bc1, _bc2, _bc3, _bc4, _bc5, _bc6 = st.columns([1.2, 1.3, 1.4, 1.3, 1.3, 2])
+                    _bc1.metric("Direction", f"{_ob_dir_icon} {_ob_dir}")
+                    _bc2.metric("Confidence", f"{_ob_conf}%" if _ob_conf else "—")
+                    _bc3.metric("Entry Price", f"${_ob_entry:,.2f}")
+                    _bc4.metric("Odds at Bet", _ob_odds_str.split("  ")[0] if "  " in _ob_odds_str else _ob_odds_str)
+                    _bc5.metric("Payout", _ob_payout_str)
+                    _bc6.metric("Live P&L", _ob_pnl_str)
+                    st.caption(
+                        f"⏰ Placed: {_ob_pred_t} · Closes: {_ob_target}"
+                        + (f" · Model: {_ob_model}" if _ob_model else "")
+                    )
+            except Exception:
+                pass
 
 with tab2:
     st.markdown("### Model Performance Analytics")
