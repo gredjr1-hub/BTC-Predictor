@@ -2907,18 +2907,40 @@ with tab6:
             value=10, step=5, key="at_max_pct"
         )
 
-    # ── Restore BTC/Cash balances from last sheet row on first load ──────────
+    # ── Restore balances + trade history from sheet on first load ────────────
     if not st.session_state.at_btc_seeded and st.session_state.at_trade_log == []:
         try:
             _at_ws = get_autotrader_sheet()
             if _at_ws is not None:
                 _at_rows = _at_ws.get_all_values()
                 if len(_at_rows) > 1:
-                    _at_last = dict(zip(_at_rows[0], _at_rows[-1]))
+                    _at_headers = _at_rows[0]
+                    _at_data_rows = _at_rows[1:]
+                    # Restore balances from last row
+                    _at_last = dict(zip(_at_headers, _at_data_rows[-1]))
                     st.session_state.at_btc = float(_at_last.get("BTC_Balance", 0)) or None
                     st.session_state.at_cash = float(_at_last.get("Cash_Balance", 500.0))
                     if st.session_state.at_btc:
                         st.session_state.at_btc_seeded = True
+                    # Rebuild at_trade_log from all rows (newest first)
+                    _at_dir_map = {"UP": "BUY", "DOWN": "SELL"}
+                    for _r in reversed(_at_data_rows):
+                        _rd = dict(zip(_at_headers, _r))
+                        try:
+                            st.session_state.at_trade_log.append({
+                                "Trade_Time": _rd.get("Trade_Time", ""),
+                                "Direction": _at_dir_map.get(_rd.get("Direction", ""), _rd.get("Direction", "")),
+                                "Confidence": float(_rd.get("Confidence", 0)),
+                                "Price": float(_rd.get("Price", 0)),
+                                "BTC_Change": float(_rd.get("BTC_Change", 0)),
+                                "Cash_Change": float(_rd.get("Cash_Change", 0)),
+                                "BTC_Balance": float(_rd.get("BTC_Balance", 0)),
+                                "Cash_Balance": float(_rd.get("Cash_Balance", 0)),
+                                "Portfolio_Value": float(_rd.get("Portfolio_Value", 0)),
+                                "Model_Used": _rd.get("Model_Used", ""),
+                            })
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -2954,7 +2976,7 @@ with tab6:
             _at_horizon_model = model[5]
             _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
             _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
-            _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
+            _at_direction = "BUY" if _at_pred_val == 1 else "SELL"
             _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
 
             if _at_conf >= _at_threshold:
@@ -3077,8 +3099,8 @@ with tab6:
             f"Price: ${_at_prices[i]:,.2f}<br>Portfolio: ${_at_pvals[i]:,.2f}"
             for i in range(len(_at_chart_data))
         ]
-        _at_colors = ["#00c896" if d == "UP" else "#ff4b4b" for d in _at_dirs]
-        _at_symbols = ["triangle-up" if d == "UP" else "triangle-down" for d in _at_dirs]
+        _at_colors = ["#00c896" if d == "BUY" else "#ff4b4b" for d in _at_dirs]
+        _at_symbols = ["triangle-up" if d == "BUY" else "triangle-down" for d in _at_dirs]
 
         _at_fig = go.Figure()
         _at_fig.add_trace(go.Scatter(
