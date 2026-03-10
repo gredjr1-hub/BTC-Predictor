@@ -426,6 +426,23 @@ def _get_cached_sheet():
     return st.session_state["_sheet_obj"]
 
 
+@st.cache_resource
+def get_autotrader_sheet():
+    """Returns the AutoTrader worksheet, creating it if needed."""
+    try:
+        ws_main = get_gspread_client().open("BTC_AI_Tracker")
+        try:
+            ws = ws_main.worksheet("AutoTrader")
+        except gspread.WorksheetNotFound:
+            ws = ws_main.add_worksheet("AutoTrader", rows=1000, cols=10)
+            ws.append_row(["Trade_Time", "Direction", "Confidence", "Entry_Price",
+                           "Trade_Amount", "Portfolio_Before", "Portfolio_After",
+                           "Outcome", "Close_Price", "PnL"])
+        return ws
+    except Exception:
+        return None
+
+
 def load_history_from_sheets():
     try:
         sheet = _get_cached_sheet()
@@ -663,12 +680,24 @@ def _load_training_stats():
 # --- 7. UI Layout (Tabs) ---
 # Reset per-cycle warning flag so the 429 warning shows once per render cycle, not 4×
 st.session_state.pop("_429_warned", None)
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+if "at_enabled" not in st.session_state:
+    st.session_state.at_enabled = False
+if "at_portfolio" not in st.session_state:
+    st.session_state.at_portfolio = 1000.0
+if "at_last_trade_time" not in st.session_state:
+    st.session_state.at_last_trade_time = None
+if "at_open_position" not in st.session_state:
+    st.session_state.at_open_position = None  # {"direction", "entry", "amount", "trade_time", "target_time"}
+if "at_trade_log" not in st.session_state:
+    st.session_state.at_trade_log = []
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔮 Live Predictor",
     "📊 Analytics & 24h Visualizer",
     "💰 P&L Simulator",
     "📈 Odds vs Performance",
     "🧠 Model Health",
+    "🤖 Auto Trade (Beta)",
 ])
 
 with tab1:
@@ -2328,6 +2357,17 @@ with tab4:
             if _odds_ver != "All" and "Model_Version" in _fdf.columns:
                 _fdf = _fdf[_fdf["Model_Version"].astype(str) == _odds_ver]
 
+            # Base for bucket table: apply all filters EXCEPT odds bucket
+            _fdf_base = _odds_df.copy()
+            if _dir_filter != "All":
+                _fdf_base = _fdf_base[_fdf_base["Prediction"] == _dir_filter]
+            if _conf_min > 0 and "Confidence" in _fdf_base.columns:
+                _fdf_base = _fdf_base[_fdf_base["Confidence"] >= _conf_min]
+            if _odds_model != "All" and "Model" in _fdf_base.columns:
+                _fdf_base = _fdf_base[_fdf_base["Model"] == _odds_model]
+            if _odds_ver != "All" and "Model_Version" in _fdf_base.columns:
+                _fdf_base = _fdf_base[_fdf_base["Model_Version"].astype(str) == _odds_ver]
+
             if _fdf.empty:
                 st.warning("No trades match the selected filters.")
             else:
@@ -2366,7 +2406,7 @@ with tab4:
                 st.markdown("#### Win Rate by Odds Bucket")
                 _bucket_rows = []
                 for _blabel, (_blo, _bhi) in _bucket_ranges.items():
-                    _bdf = _odds_df[(_odds_df["Odds_Pct"] >= _blo) & (_odds_df["Odds_Pct"] < _bhi)]
+                    _bdf = _fdf_base[(_fdf_base["Odds_Pct"] >= _blo) & (_fdf_base["Odds_Pct"] < _bhi)]
                     if len(_bdf) == 0:
                         continue
                     _bwins = len(_bdf[_bdf["Outcome"] == "Win"])
@@ -2845,3 +2885,269 @@ with tab5:
                             st.dataframe(_fi_df, hide_index=True, use_container_width=True)
         else:
             st.caption("No update history recorded yet. Run train_model.py or update_brain.py to begin tracking.")
+
+# ── Tab 6: Auto Trade (Beta) ─────────────────────────────────────────────────
+with tab6:
+    st.warning("⚠️ Beta — paper trading only. No real funds are used.")
+
+    # ── Controls ─────────────────────────────────────────────────────────────
+    _at_col1, _at_col2, _at_col3 = st.columns(3)
+    with _at_col1:
+        st.session_state.at_enabled = st.toggle(
+            "Enable Auto Trader", value=st.session_state.at_enabled
+        )
+    with _at_col2:
+        _at_threshold = st.slider(
+            "Min Confidence (%)", min_value=55, max_value=90,
+            value=60, step=1, key="at_threshold"
+        )
+    with _at_col3:
+        _at_max_pct = st.slider(
+            "Max % per Trade", min_value=5, max_value=50,
+            value=10, step=5, key="at_max_pct"
+        )
+
+    # ── Seed portfolio from sheet on first load ───────────────────────────────
+    if st.session_state.at_portfolio == 1000.0 and st.session_state.at_trade_log == []:
+        try:
+            _at_ws = get_autotrader_sheet()
+            if _at_ws is not None:
+                _at_rows = _at_ws.get_all_values()
+                if len(_at_rows) > 1:
+                    _at_headers = _at_rows[0]
+                    _at_portfolio_val = 1000.0
+                    _at_loaded_log = []
+                    for _at_row in _at_rows[1:]:
+                        _at_rec = dict(zip(_at_headers, _at_row + [""] * max(0, len(_at_headers) - len(_at_row))))
+                        if _at_rec.get("Outcome") in ("Win", "Loss"):
+                            try:
+                                _at_loaded_log.append({
+                                    "Trade_Time": _at_rec.get("Trade_Time", ""),
+                                    "Direction": _at_rec.get("Direction", ""),
+                                    "Confidence": float(_at_rec.get("Confidence", 0)),
+                                    "Entry_Price": float(_at_rec.get("Entry_Price", 0)),
+                                    "Trade_Amount": float(_at_rec.get("Trade_Amount", 0)),
+                                    "Portfolio_Before": float(_at_rec.get("Portfolio_Before", 0)),
+                                    "Portfolio_After": float(_at_rec.get("Portfolio_After", 0)),
+                                    "Outcome": _at_rec.get("Outcome", ""),
+                                    "Close_Price": _at_rec.get("Close_Price", ""),
+                                    "PnL": float(_at_rec.get("PnL", 0)),
+                                })
+                                _at_portfolio_val = float(_at_rec.get("Portfolio_After", _at_portfolio_val))
+                            except (ValueError, TypeError):
+                                pass
+                    if _at_loaded_log:
+                        st.session_state.at_trade_log = _at_loaded_log
+                        st.session_state.at_portfolio = _at_portfolio_val
+        except Exception:
+            pass
+
+    # ── Bot logic ─────────────────────────────────────────────────────────────
+    if st.session_state.at_enabled:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=60000, key="at_refresh")
+
+        _at_now = datetime.utcnow()
+
+        # Grade open position if target time has passed
+        if st.session_state.at_open_position is not None:
+            _at_pos = st.session_state.at_open_position
+            _at_target_dt = _at_pos["target_time"]
+            if isinstance(_at_target_dt, str):
+                _at_target_dt = datetime.fromisoformat(_at_target_dt)
+            if _at_now >= _at_target_dt:
+                try:
+                    _at_close_data = get_live_prediction_data()
+                    _at_close_price = float(_at_close_data.iloc[-1]["Close"])
+                    _at_live_close = get_live_ticker_price()
+                    if _at_live_close:
+                        _at_close_price = _at_live_close
+
+                    _at_direction = _at_pos["direction"]
+                    _at_entry = _at_pos["entry"]
+                    _at_amount = _at_pos["amount"]
+                    _at_port_before = _at_pos["portfolio_before"]
+
+                    if _at_direction == "UP":
+                        _at_win = _at_close_price > _at_entry
+                    else:
+                        _at_win = _at_close_price < _at_entry
+
+                    if _at_win:
+                        _at_pnl = _at_amount * 0.9
+                        _at_outcome = "Win"
+                    else:
+                        _at_pnl = -_at_amount
+                        _at_outcome = "Loss"
+
+                    _at_port_after = _at_port_before + _at_pnl
+                    st.session_state.at_portfolio = _at_port_after
+
+                    # Update trade log entry
+                    _at_trade_time_str = _at_pos["trade_time"]
+                    for _at_entry_rec in st.session_state.at_trade_log:
+                        if _at_entry_rec.get("Trade_Time") == _at_trade_time_str and _at_entry_rec.get("Outcome") == "Pending":
+                            _at_entry_rec["Outcome"] = _at_outcome
+                            _at_entry_rec["Close_Price"] = round(_at_close_price, 2)
+                            _at_entry_rec["PnL"] = round(_at_pnl, 2)
+                            _at_entry_rec["Portfolio_After"] = round(_at_port_after, 2)
+                            break
+
+                    # Update sheet row
+                    try:
+                        _at_ws = get_autotrader_sheet()
+                        if _at_ws is not None:
+                            _at_all = _at_ws.get_all_values()
+                            for _at_ri, _at_row in enumerate(_at_all[1:], start=2):
+                                if _at_row and _at_row[0] == _at_trade_time_str:
+                                    _at_ws.update_cell(_at_ri, 7, round(_at_port_after, 2))  # Portfolio_After
+                                    _at_ws.update_cell(_at_ri, 8, _at_outcome)               # Outcome
+                                    _at_ws.update_cell(_at_ri, 9, round(_at_close_price, 2)) # Close_Price
+                                    _at_ws.update_cell(_at_ri, 10, round(_at_pnl, 2))         # PnL
+                                    break
+                    except Exception:
+                        pass
+
+                    st.session_state.at_open_position = None
+                    st.success(f"Position graded: {_at_outcome} | P&L: ${_at_pnl:+.2f}")
+                except Exception as _at_grade_err:
+                    st.warning(f"Could not grade open position: {_at_grade_err}")
+
+        # Open new trade if no open position and cooldown passed
+        if st.session_state.at_open_position is None:
+            _at_last = st.session_state.at_last_trade_time
+            _at_cooldown_ok = (
+                _at_last is None
+                or (_at_now - _at_last).total_seconds() >= 60
+            )
+            if _at_cooldown_ok:
+                try:
+                    _at_live = get_live_prediction_data()
+                    _at_state = _at_live.iloc[-1:]
+                    _at_cur_price = float(_at_state["Close"].values[0])
+                    _at_live_price = get_live_ticker_price()
+                    _at_entry_price = _at_live_price if _at_live_price else _at_cur_price
+
+                    _at_target = snap_to_polymarket_window(datetime.utcnow())
+                    _at_win_start = _at_target - timedelta(minutes=5)
+                    _at_wsp = fetch_pyth_price_at(_at_win_start)
+                    if _at_wsp is None:
+                        _at_wsp_candles = _at_live[_at_live.index == _at_win_start]
+                        _at_wsp = (
+                            float(_at_wsp_candles["Close"].values[0])
+                            if not _at_wsp_candles.empty
+                            else _at_cur_price
+                        )
+
+                    _at_price_chg = (
+                        (_at_cur_price - _at_wsp) / _at_wsp
+                        if _at_wsp and _at_wsp != 0
+                        else 0.0
+                    )
+
+                    _AT_FEATURE_COLS = [
+                        'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
+                        'BB_Upper', 'BB_Lower', 'Volume_ROC',
+                        'price_change_since_window_start', 'price_change_abs'
+                    ]
+                    _at_state = _at_state.copy()
+                    _at_state["price_change_since_window_start"] = _at_price_chg
+                    _at_state["price_change_abs"] = abs(_at_price_chg)
+                    _at_state_pred = _at_state[_AT_FEATURE_COLS]
+
+                    _at_horizon_model = model[5]
+                    _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
+                    _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
+                    _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
+                    _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
+
+                    if _at_conf >= _at_threshold:
+                        _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+                        _at_trade_amount = st.session_state.at_portfolio * (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
+                        _at_trade_amount = round(_at_trade_amount, 2)
+                        _at_port_before = round(st.session_state.at_portfolio, 2)
+                        _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+                        st.session_state.at_open_position = {
+                            "direction": _at_direction,
+                            "entry": _at_entry_price,
+                            "amount": _at_trade_amount,
+                            "trade_time": _at_trade_time_str,
+                            "target_time": _at_target.isoformat(),
+                            "portfolio_before": _at_port_before,
+                        }
+                        st.session_state.at_last_trade_time = _at_now
+
+                        _at_log_entry = {
+                            "Trade_Time": _at_trade_time_str,
+                            "Direction": _at_direction,
+                            "Confidence": round(_at_conf, 1),
+                            "Entry_Price": round(_at_entry_price, 2),
+                            "Trade_Amount": _at_trade_amount,
+                            "Portfolio_Before": _at_port_before,
+                            "Portfolio_After": "—",
+                            "Outcome": "Pending",
+                            "Close_Price": "—",
+                            "PnL": "—",
+                        }
+                        st.session_state.at_trade_log.insert(0, _at_log_entry)
+
+                        try:
+                            _at_ws = get_autotrader_sheet()
+                            if _at_ws is not None:
+                                _at_ws.append_row([
+                                    _at_trade_time_str,
+                                    _at_direction,
+                                    round(_at_conf, 1),
+                                    round(_at_entry_price, 2),
+                                    _at_trade_amount,
+                                    _at_port_before,
+                                    "",       # Portfolio_After (pending)
+                                    "Pending",
+                                    "",       # Close_Price
+                                    "",       # PnL
+                                ])
+                        except Exception:
+                            pass
+
+                        st.info(f"New trade opened: {_at_direction} @ ${_at_entry_price:,.2f} | Conf: {_at_conf:.1f}% | Size: ${_at_trade_amount:.2f}")
+                    else:
+                        st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}%")
+
+                except Exception as _at_trade_err:
+                    st.warning(f"Auto trader error: {_at_trade_err}")
+
+    # ── Open position status ──────────────────────────────────────────────────
+    if st.session_state.at_open_position is not None:
+        _at_pos = st.session_state.at_open_position
+        st.info(
+            f"**Open Position:** {_at_pos['direction']} | "
+            f"Entry: ${float(_at_pos['entry']):,.2f} | "
+            f"Size: ${float(_at_pos['amount']):.2f} | "
+            f"Resolves at: {_at_pos['target_time']}"
+        )
+
+    # ── Portfolio metrics ─────────────────────────────────────────────────────
+    _at_completed = [t for t in st.session_state.at_trade_log if t.get("Outcome") in ("Win", "Loss")]
+    _at_wins = sum(1 for t in _at_completed if t.get("Outcome") == "Win")
+    _at_total = len(_at_completed)
+    _at_win_rate = (_at_wins / _at_total * 100) if _at_total > 0 else 0.0
+    _at_total_pnl = sum(float(t.get("PnL", 0)) for t in _at_completed)
+
+    _at_m1, _at_m2, _at_m3, _at_m4 = st.columns(4)
+    _at_m1.metric("Portfolio Value", f"${st.session_state.at_portfolio:,.2f}",
+                  delta=f"${st.session_state.at_portfolio - 1000.0:+,.2f}")
+    _at_m2.metric("Total P&L", f"${_at_total_pnl:+,.2f}")
+    _at_m3.metric("Win Rate", f"{_at_win_rate:.1f}%")
+    _at_m4.metric("Completed Trades", str(_at_total))
+
+    # ── Trade history ─────────────────────────────────────────────────────────
+    if st.session_state.at_trade_log:
+        st.markdown("#### Trade History")
+        st.dataframe(
+            pd.DataFrame(st.session_state.at_trade_log),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.caption("No trades yet. Enable the bot and wait for a signal above the confidence threshold.")
