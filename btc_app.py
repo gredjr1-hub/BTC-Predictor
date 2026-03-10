@@ -574,9 +574,8 @@ if _fragment is None:
         return _wrap
 
 
-@_fragment(run_every="2s")
+@_fragment()
 def live_market_and_advanced_stats_fragment(
-    pending_trades,
     overall_wr,
     p90_wr,
     p90_threshold,
@@ -586,59 +585,9 @@ def live_market_and_advanced_stats_fragment(
     avg_conf_loss,
 ):
     """Only this section reruns every 2 seconds while the session is active."""
-    st.markdown("#### ⚡ Live Market & Advanced Stats")
-    st.caption("Auto-updating live price every 2 seconds (fragment rerun).")
+    st.markdown("#### 📊 Advanced Stats")
 
-    # Store the last successful live price so the UI stays stable through transient API hiccups.
-    if "last_live_price" not in st.session_state:
-        st.session_state.last_live_price = None
-        st.session_state.last_live_price_ts = None
-
-    live_price = get_live_ticker_price()
-    if live_price is not None:
-        st.session_state.last_live_price = float(live_price)
-        st.session_state.last_live_price_ts = datetime.utcnow()
-    else:
-        live_price = st.session_state.last_live_price
-
-    col_live, col_stats1, col_stats2 = st.columns([1.5, 1, 1])
-
-    with col_live:
-        if live_price is not None:
-            st.metric("Live BTC/USDT Price", f"${float(live_price):,.2f}")
-
-            ts = st.session_state.get("last_live_price_ts")
-            if ts:
-                st.caption(f"Last tick: {fmt_et(ts, '%H:%M:%S %Z')} • Source: Kraken (CCXT)")
-            else:
-                st.caption("Source: Kraken (CCXT)")
-
-            if pending_trades is not None and not pending_trades.empty:
-                st.markdown("**Active Open Bets:**")
-                for _, row in pending_trades.iterrows():
-                    try:
-                        ref_raw = row.get("Window_Start_Price")
-                        ref = (
-                            float(ref_raw)
-                            if pd.notna(ref_raw) and float(ref_raw) > 0
-                            else float(row["Entry_Price"])
-                        )
-                    except Exception:
-                        continue
-
-                    direction = row.get("Prediction", "")
-                    diff = float(live_price) - ref if direction == "UP" else ref - float(live_price)
-                    status_color = "green" if diff > 0 else "red"
-                    status_icon = "🟢 Profit" if diff > 0 else "🔴 Loss"
-                    target_str = fmt_et(row.get("Target_Time"), "%H:%M %Z") or "N/A"
-                    bc1, bc2, bc3 = st.columns([1, 2, 2])
-                    bc1.markdown(f"**{direction}**")
-                    bc2.markdown(f"Open @ **${ref:,.2f}** → closes {target_str}")
-                    bc3.markdown(f":{status_color}[{status_icon} (${abs(diff):,.2f})]")
-            else:
-                st.markdown("*No active bets currently open.*")
-        else:
-            st.warning("Could not fetch live price (Kraken).")
+    col_stats1, col_stats2 = st.columns(2)
 
     with col_stats1:
         st.markdown("**Core Win Rates:**")
@@ -891,6 +840,28 @@ with tab1:
     _t1_lc_col, _t1_odds_col = st.columns([1, 1.5])
 
     with _t1_lc_col:
+        # ── Live ticker ───────────────────────────────────────────────────────
+        if "last_live_price" not in st.session_state:
+            st.session_state.last_live_price = None
+            st.session_state.last_live_price_ts = None
+        _t1_live_price_val = get_live_ticker_price()
+        if _t1_live_price_val is not None:
+            st.session_state.last_live_price = float(_t1_live_price_val)
+            st.session_state.last_live_price_ts = datetime.utcnow()
+        else:
+            _t1_live_price_val = st.session_state.last_live_price
+        if _t1_live_price_val is not None:
+            st.metric("Live BTC/USDT Price", f"${float(_t1_live_price_val):,.2f}")
+            _t1_tick_ts = st.session_state.get("last_live_price_ts")
+            if _t1_tick_ts:
+                st.caption(f"Last tick: {fmt_et(_t1_tick_ts, '%H:%M:%S %Z')} • Source: Kraken (CCXT)")
+            else:
+                st.caption("Source: Kraken (CCXT)")
+        else:
+            st.warning("Could not fetch live price (Kraken).")
+
+        st.markdown("---")
+        # ── Last AI Prediction ────────────────────────────────────────────────
         st.markdown("**Last AI Prediction**")
         _t1_last_history, _ = load_history_from_sheets()
         if not _t1_last_history.empty:
@@ -1180,10 +1151,10 @@ with tab2:
         _stats_model = _scol2.selectbox(
             "Stats model", options=_available_models, key="stats_model_filter",
         )
-        _stats_odds_bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _stats_odds_bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
         _stats_odds_bucket = _scol3.selectbox(
             "Odds bucket", options=_stats_odds_bucket_opts, key="stats_odds_bucket_filter",
-            help="Filter stats to trades where Polymarket odds fell in this range. '>50%' excludes contrarian bets.",
+            help="Filter stats to trades in this odds range. '>50%' = market agrees (aligned); '<50%' = contrarian bets only.",
         )
 
         # Build filtered slice for the stats display
@@ -1199,6 +1170,7 @@ with tab2:
         if _stats_odds_bucket != "All" and "Polymarket_Odds" in _stats_trades.columns:
             _stats_bucket_map = {
                 ">50%": (0.50, 1.01),
+                "<50%": (0.0, 0.50),
                 "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
                 "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
             }
@@ -1209,9 +1181,7 @@ with tab2:
             ]
         _stats_total = len(_stats_trades)
 
-        # --- Precompute stats once (fragment uses these values while only the price updates) ---
-        pending_trades = history[history["Outcome"] == "Pending"]
-
+        # --- Precompute stats for the Advanced Stats fragment ---
         wins = len(_stats_trades[_stats_trades["Outcome"] == "Win"])
         overall_wr = (wins / _stats_total * 100) if _stats_total > 0 else 0.0
 
@@ -1250,9 +1220,8 @@ with tab2:
                 avg_conf_win = float(avg_conf_win) if pd.notna(avg_conf_win) else 0.0
                 avg_conf_loss = float(avg_conf_loss) if pd.notna(avg_conf_loss) else 0.0
 
-        # --- Live Market & Advanced Stats (auto-refreshes every 2s without full page rerun) ---
+        # --- Advanced Stats ---
         live_market_and_advanced_stats_fragment(
-            pending_trades=pending_trades,
             overall_wr=overall_wr,
             p90_wr=p90_wr,
             p90_threshold=p90_threshold,
@@ -1388,7 +1357,7 @@ with tab3:
             help="Restrict the simulation to trades within this lookback window.",
         )
     with _pl_row1b:
-        _pl_bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _pl_bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
         _pl_odds_bucket = st.selectbox(
             "Odds bucket",
             options=_pl_bucket_opts,
@@ -1463,6 +1432,7 @@ with tab3:
             completed_with_odds = completed_with_odds[completed_with_odds["Prediction"] == _pl_dir_filter]
         _pl_bucket_map = {
             ">50%": (0.50, 1.01),
+            "<50%": (0.0, 0.50),
             "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
             "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
         }
@@ -1494,6 +1464,7 @@ with tab3:
                 _opt_bkt_map = {
                     "All": None,
                     ">50%": (0.50, 1.01),
+                    "<50%": (0.0, 0.50),
                     "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
                     "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
                 }
@@ -1799,7 +1770,7 @@ with tab4:
         else:
             # ── Filters ──────────────────────────────────────────────────────
             fc1, fc2, fc3, fc4 = st.columns(4)
-            _bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+            _bucket_opts = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
             _odds_bucket = fc1.selectbox("Odds bucket", _bucket_opts, key="t5_bucket")
             _dir_filter = fc2.selectbox("Direction", ["All", "UP", "DOWN"], key="t5_dir")
             _conf_min = fc3.number_input("Min Confidence (%)", 0, 100, 0, step=5, key="t5_conf")
@@ -1812,6 +1783,7 @@ with tab4:
 
             _bucket_ranges = {
                 ">50%": (50, 101),
+                "<50%": (0, 50),
                 "50–60%": (50, 60), "60–70%": (60, 70),
                 "70–80%": (70, 80), "80–90%": (80, 90), "90%+": (90, 101),
             }
