@@ -688,8 +688,6 @@ if "at_cash" not in st.session_state:
     st.session_state.at_cash = 500.0      # USD cash
 if "at_btc_seeded" not in st.session_state:
     st.session_state.at_btc_seeded = False
-if "at_open_position" not in st.session_state:
-    st.session_state.at_open_position = None  # {"direction", "entry", "trade_time", "target_time"}
 if "at_trade_log" not in st.session_state:
     st.session_state.at_trade_log = []
 
@@ -2929,155 +2927,130 @@ with tab6:
         from streamlit_autorefresh import st_autorefresh
         st_autorefresh(interval=60000, key="at_refresh")
 
-        _at_now = datetime.utcnow()
+        try:
+            _at_live = get_live_prediction_data()
+            _at_state = _at_live.iloc[-1:]
+            _at_cur_price = float(_at_state["Close"].values[0])
+            _at_live_price = get_live_ticker_price()
+            _at_entry_price = _at_live_price if _at_live_price else _at_cur_price
 
-        # Release hold if target time has passed (no grading needed)
-        if st.session_state.at_open_position is not None:
-            _at_pos = st.session_state.at_open_position
-            _at_target_dt = _at_pos["target_time"]
-            if isinstance(_at_target_dt, str):
-                _at_target_dt = datetime.fromisoformat(_at_target_dt)
-            if _at_now >= _at_target_dt:
-                st.session_state.at_open_position = None
+            # Seed BTC on first trade if not yet done
+            if not st.session_state.at_btc_seeded:
+                st.session_state.at_btc = 500.0 / _at_entry_price
+                st.session_state.at_btc_seeded = True
 
-        # Open new trade if no open position
-        if st.session_state.at_open_position is None:
-            try:
-                _at_live = get_live_prediction_data()
-                _at_state = _at_live.iloc[-1:]
-                _at_cur_price = float(_at_state["Close"].values[0])
-                _at_live_price = get_live_ticker_price()
-                _at_entry_price = _at_live_price if _at_live_price else _at_cur_price
+            _at_price_chg = 0.0
 
-                # Seed BTC on first trade if not yet done
-                if not st.session_state.at_btc_seeded:
-                    st.session_state.at_btc = 500.0 / _at_entry_price
-                    st.session_state.at_btc_seeded = True
+            _AT_FEATURE_COLS = [
+                'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
+                'BB_Upper', 'BB_Lower', 'Volume_ROC',
+                'price_change_since_window_start', 'price_change_abs'
+            ]
+            _at_state = _at_state.copy()
+            _at_state["price_change_since_window_start"] = _at_price_chg
+            _at_state["price_change_abs"] = abs(_at_price_chg)
+            _at_state_pred = _at_state[_AT_FEATURE_COLS]
 
-                _at_price_chg = 0.0
+            _at_horizon_model = model[5]
+            _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
+            _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
+            _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
+            _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
 
-                _AT_FEATURE_COLS = [
-                    'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
-                    'BB_Upper', 'BB_Lower', 'Volume_ROC',
-                    'price_change_since_window_start', 'price_change_abs'
-                ]
-                _at_state = _at_state.copy()
-                _at_state["price_change_since_window_start"] = _at_price_chg
-                _at_state["price_change_abs"] = abs(_at_price_chg)
-                _at_state_pred = _at_state[_AT_FEATURE_COLS]
+            if _at_conf >= _at_threshold:
+                _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+                _at_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
+                _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-                _at_horizon_model = model[5]
-                _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
-                _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
-                _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
-                _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
+                if _at_direction == "UP":
+                    _at_cash_used = round(st.session_state.at_cash * _at_pct, 2)
+                    if _at_cash_used < 1.0:
+                        st.caption("No trade: insufficient cash")
+                    else:
+                        _at_btc_bought = _at_cash_used / _at_entry_price
+                        st.session_state.at_cash -= _at_cash_used
+                        st.session_state.at_btc += _at_btc_bought
+                        _at_btc_change = round(_at_btc_bought, 8)   # positive = bought
+                        _at_cash_change = round(-_at_cash_used, 2)  # negative = spent
+                        _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
 
-                if _at_conf >= _at_threshold:
-                    _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
-                    _at_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
-                    _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                        _at_log_entry = {
+                            "Trade_Time": _at_trade_time_str,
+                            "Direction": _at_direction,
+                            "Confidence": round(_at_conf, 1),
+                            "Price": round(_at_entry_price, 2),
+                            "BTC_Change": _at_btc_change,
+                            "Cash_Change": _at_cash_change,
+                            "BTC_Balance": round(st.session_state.at_btc, 8),
+                            "Cash_Balance": round(st.session_state.at_cash, 2),
+                            "Portfolio_Value": _at_portfolio_value,
+                            "Model_Used": "5min",
+                        }
+                        st.session_state.at_trade_log.insert(0, _at_log_entry)
 
-                    if _at_direction == "UP":
-                        _at_cash_used = round(st.session_state.at_cash * _at_pct, 2)
-                        if _at_cash_used < 1.0:
-                            st.caption("No trade: insufficient cash")
-                        else:
-                            _at_btc_bought = _at_cash_used / _at_entry_price
-                            st.session_state.at_cash -= _at_cash_used
-                            st.session_state.at_btc += _at_btc_bought
-                            _at_btc_change = round(_at_btc_bought, 8)   # positive = bought
-                            _at_cash_change = round(-_at_cash_used, 2)  # negative = spent
-                            _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
+                        try:
+                            _at_ws = get_autotrader_sheet()
+                            if _at_ws is not None:
+                                _at_ws.append_row([
+                                    _at_trade_time_str, _at_direction,
+                                    round(_at_conf, 1), round(_at_entry_price, 2),
+                                    _at_btc_change, _at_cash_change,
+                                    round(st.session_state.at_btc, 8),
+                                    round(st.session_state.at_cash, 2),
+                                    _at_portfolio_value, "5min",
+                                ])
+                        except Exception:
+                            pass
 
-                            _at_log_entry = {
-                                "Trade_Time": _at_trade_time_str,
-                                "Direction": _at_direction,
-                                "Confidence": round(_at_conf, 1),
-                                "Price": round(_at_entry_price, 2),
-                                "BTC_Change": _at_btc_change,
-                                "Cash_Change": _at_cash_change,
-                                "BTC_Balance": round(st.session_state.at_btc, 8),
-                                "Cash_Balance": round(st.session_state.at_cash, 2),
-                                "Portfolio_Value": _at_portfolio_value,
-                                "Model_Used": "5min",
-                            }
-                            st.session_state.at_trade_log.insert(0, _at_log_entry)
+                        st.info(f"BUY {_at_btc_change:.6f} BTC @ ${_at_entry_price:,.2f} | Spent: ${abs(_at_cash_change):.2f} | Conf: {_at_conf:.1f}%")
 
-                            try:
-                                _at_ws = get_autotrader_sheet()
-                                if _at_ws is not None:
-                                    _at_ws.append_row([
-                                        _at_trade_time_str, _at_direction,
-                                        round(_at_conf, 1), round(_at_entry_price, 2),
-                                        _at_btc_change, _at_cash_change,
-                                        round(st.session_state.at_btc, 8),
-                                        round(st.session_state.at_cash, 2),
-                                        _at_portfolio_value, "5min",
-                                    ])
-                            except Exception:
-                                pass
+                else:  # DOWN
+                    _at_btc_sold = round(st.session_state.at_btc * _at_pct, 8)
+                    if _at_btc_sold * _at_entry_price < 1.0:
+                        st.caption("No trade: insufficient BTC")
+                    else:
+                        _at_cash_received = _at_btc_sold * _at_entry_price
+                        st.session_state.at_btc -= _at_btc_sold
+                        st.session_state.at_cash += _at_cash_received
+                        _at_btc_change = round(-_at_btc_sold, 8)         # negative = sold
+                        _at_cash_change = round(_at_cash_received, 2)    # positive = received
+                        _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
 
-                            st.session_state.at_open_position = {
-                                "direction": _at_direction,
-                                "entry": _at_entry_price,
-                                "trade_time": _at_trade_time_str,
-                                "target_time": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-                            }
-                            st.info(f"BUY {_at_btc_change:.6f} BTC @ ${_at_entry_price:,.2f} | Spent: ${abs(_at_cash_change):.2f} | Conf: {_at_conf:.1f}%")
+                        _at_log_entry = {
+                            "Trade_Time": _at_trade_time_str,
+                            "Direction": _at_direction,
+                            "Confidence": round(_at_conf, 1),
+                            "Price": round(_at_entry_price, 2),
+                            "BTC_Change": _at_btc_change,
+                            "Cash_Change": _at_cash_change,
+                            "BTC_Balance": round(st.session_state.at_btc, 8),
+                            "Cash_Balance": round(st.session_state.at_cash, 2),
+                            "Portfolio_Value": _at_portfolio_value,
+                            "Model_Used": "5min",
+                        }
+                        st.session_state.at_trade_log.insert(0, _at_log_entry)
 
-                    else:  # DOWN
-                        _at_btc_sold = round(st.session_state.at_btc * _at_pct, 8)
-                        if _at_btc_sold * _at_entry_price < 1.0:
-                            st.caption("No trade: insufficient BTC")
-                        else:
-                            _at_cash_received = _at_btc_sold * _at_entry_price
-                            st.session_state.at_btc -= _at_btc_sold
-                            st.session_state.at_cash += _at_cash_received
-                            _at_btc_change = round(-_at_btc_sold, 8)         # negative = sold
-                            _at_cash_change = round(_at_cash_received, 2)    # positive = received
-                            _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
+                        try:
+                            _at_ws = get_autotrader_sheet()
+                            if _at_ws is not None:
+                                _at_ws.append_row([
+                                    _at_trade_time_str, _at_direction,
+                                    round(_at_conf, 1), round(_at_entry_price, 2),
+                                    _at_btc_change, _at_cash_change,
+                                    round(st.session_state.at_btc, 8),
+                                    round(st.session_state.at_cash, 2),
+                                    _at_portfolio_value, "5min",
+                                ])
+                        except Exception:
+                            pass
 
-                            _at_log_entry = {
-                                "Trade_Time": _at_trade_time_str,
-                                "Direction": _at_direction,
-                                "Confidence": round(_at_conf, 1),
-                                "Price": round(_at_entry_price, 2),
-                                "BTC_Change": _at_btc_change,
-                                "Cash_Change": _at_cash_change,
-                                "BTC_Balance": round(st.session_state.at_btc, 8),
-                                "Cash_Balance": round(st.session_state.at_cash, 2),
-                                "Portfolio_Value": _at_portfolio_value,
-                                "Model_Used": "5min",
-                            }
-                            st.session_state.at_trade_log.insert(0, _at_log_entry)
+                        st.info(f"SELL {abs(_at_btc_change):.6f} BTC @ ${_at_entry_price:,.2f} | Received: ${_at_cash_change:.2f} | Conf: {_at_conf:.1f}%")
+            else:
+                _at_checked_at = datetime.utcnow().strftime("%H:%M:%S UTC")
+                st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}% — last checked {_at_checked_at}")
 
-                            try:
-                                _at_ws = get_autotrader_sheet()
-                                if _at_ws is not None:
-                                    _at_ws.append_row([
-                                        _at_trade_time_str, _at_direction,
-                                        round(_at_conf, 1), round(_at_entry_price, 2),
-                                        _at_btc_change, _at_cash_change,
-                                        round(st.session_state.at_btc, 8),
-                                        round(st.session_state.at_cash, 2),
-                                        _at_portfolio_value, "5min",
-                                    ])
-                            except Exception:
-                                pass
-
-                            st.session_state.at_open_position = {
-                                "direction": _at_direction,
-                                "entry": _at_entry_price,
-                                "trade_time": _at_trade_time_str,
-                                "target_time": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
-                            }
-                            st.info(f"SELL {abs(_at_btc_change):.6f} BTC @ ${_at_entry_price:,.2f} | Received: ${_at_cash_change:.2f} | Conf: {_at_conf:.1f}%")
-                else:
-                    _at_checked_at = datetime.utcnow().strftime("%H:%M:%S UTC")
-                    st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}% — last checked {_at_checked_at}")
-
-            except Exception as _at_trade_err:
-                st.warning(f"Auto trader error: {_at_trade_err}")
+        except Exception as _at_trade_err:
+            st.warning(f"Auto trader error: {_at_trade_err}")
 
     # ── Portfolio metrics ─────────────────────────────────────────────────────
     _at_current_price = get_live_ticker_price() or (float(get_live_prediction_data().iloc[-1]["Close"]) if True else 0)
