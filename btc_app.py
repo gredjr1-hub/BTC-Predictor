@@ -1329,6 +1329,16 @@ def _quick_pl_sim(trades_df, apply_skip_rules=True):
 
 
 with tab3:
+    # Inject optimal filter values BEFORE widgets are created to avoid the
+    # "widget key already bound" StreamlitAPIException when Apply is clicked.
+    if "_pl_apply_pending" in st.session_state:
+        _pa = st.session_state.pop("_pl_apply_pending")
+        st.session_state["pl_time"] = _pa["time"]
+        st.session_state["pl_odds_bucket"] = _pa["bucket"]
+        st.session_state["pl_dir"] = _pa["dir"]
+        st.session_state["pl_model"] = _pa["model"]
+        st.session_state["pl_min_conf"] = _pa["min_conf"]
+
     st.markdown("### 💰 P&L Simulator")
     st.markdown(
         "Simulates portfolio growth starting from **$1,000** using your logged predictions, "
@@ -1529,11 +1539,10 @@ with tab3:
                 f"This is the historically optimal configuration — it may not generalise to future trades."
             )
             if st.button("✅ Apply Optimal Filters"):
-                st.session_state["pl_time"] = _r["time"]
-                st.session_state["pl_odds_bucket"] = _r["bucket"]
-                st.session_state["pl_dir"] = _r["dir"]
-                st.session_state["pl_model"] = _r["model"]
-                st.session_state["pl_min_conf"] = _r["min_conf"]
+                st.session_state["_pl_apply_pending"] = {
+                    "time": _r["time"], "bucket": _r["bucket"],
+                    "dir": _r["dir"], "model": _r["model"], "min_conf": _r["min_conf"],
+                }
                 st.rerun()
         elif not _run_opt:
             # Show a placeholder hint when no result yet
