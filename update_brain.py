@@ -85,7 +85,13 @@ def stitch_and_train(new_data):
     
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
     model.fit(X, y)
-    
+
+    _feature_names = combined_df.drop(columns=["Target"]).columns.tolist()
+    _feat_importance = {
+        feat: round(float(imp), 4)
+        for feat, imp in zip(_feature_names, model.feature_importances_)
+    }
+
     joblib.dump(model, MODEL_FILE)
     print("✅ Model successfully upgraded and saved!")
 
@@ -105,6 +111,7 @@ def stitch_and_train(new_data):
         "new_rows_added": len(combined_df) - _prev_meta.get("total_rows", len(combined_df)),
         "previous_total_rows": _prev_meta.get("total_rows"),
         "previous_retrained_at_utc": _prev_meta.get("retrained_at_utc"),
+        "feature_importance": _feat_importance,
     }
     with open("model_metadata.json", "w") as _f:
         json.dump(_meta, _f, indent=2)
@@ -119,6 +126,7 @@ def stitch_and_train(new_data):
         "new_rows_added": _meta["new_rows_added"],
         "data_start": _meta["data_start"],
         "data_end": _meta["data_end"],
+        "feature_importance": _feat_importance,
     }
     try:
         with open(_hist_path) as _f:

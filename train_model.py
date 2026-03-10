@@ -52,6 +52,15 @@ def train_production_model(filepath):
     print(f"\n✅ Saved dict of 5 horizon-specific models to {model_filename}")
     print("  Keys: {1: 1-min-left model, 2: 2-min-left, ..., 5: 5-min-left (boundary)}")
 
+    # Capture per-horizon feature importances
+    _feat_importance = {
+        str(h): {
+            feat: round(float(imp), 4)
+            for feat, imp in zip(FEATURE_COLS, rf.feature_importances_)
+        }
+        for h, rf in models.items()
+    }
+
     _meta = {
         "retrained_at_utc": _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "script": "train_model.py",
@@ -62,6 +71,7 @@ def train_production_model(filepath):
         "new_rows_added": None,
         "previous_total_rows": None,
         "previous_retrained_at_utc": None,
+        "feature_importance": _feat_importance,
     }
     with open("model_metadata.json", "w") as _f:
         json.dump(_meta, _f, indent=2)
@@ -76,6 +86,7 @@ def train_production_model(filepath):
         "new_rows_added": None,
         "data_start": _meta["data_start"],
         "data_end": _meta["data_end"],
+        "feature_importance": _feat_importance,
     }
     try:
         with open(_hist_path) as _f:

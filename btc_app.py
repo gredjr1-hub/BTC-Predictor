@@ -2372,6 +2372,35 @@ with tab5:
                     "data_end": None,
                 })
 
+    # --- Load live feature importances from joblib model ---
+    _live_importances = {}  # {hz_str: {feature: importance}}
+    try:
+        _model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "btc_5m_rf_model.joblib")
+        _loaded_model = joblib.load(_model_path)
+        if isinstance(_loaded_model, dict):
+            # train_model.py format: {1: rf, 2: rf, ...}
+            for _hz_key, _rf in _loaded_model.items():
+                if hasattr(_rf, "feature_importances_") and hasattr(_rf, "feature_names_in_"):
+                    _live_importances[str(_hz_key)] = dict(
+                        zip(_rf.feature_names_in_.tolist(), _rf.feature_importances_.tolist())
+                    )
+        elif hasattr(_loaded_model, "feature_importances_") and hasattr(_loaded_model, "feature_names_in_"):
+            # update_brain.py format: single model
+            _single_fi = dict(zip(_loaded_model.feature_names_in_.tolist(), _loaded_model.feature_importances_.tolist()))
+            for _hz_key in range(1, 6):
+                _live_importances[str(_hz_key)] = _single_fi
+    except Exception:
+        pass
+    # Fallback to metadata feature_importance if joblib unavailable
+    if not _live_importances and _model_meta.get("feature_importance"):
+        _meta_fi = _model_meta["feature_importance"]
+        _is_per_hz = isinstance(next(iter(_meta_fi.values()), None), dict)
+        if _is_per_hz:
+            _live_importances = _meta_fi
+        else:
+            for _hz_key in range(1, 6):
+                _live_importances[str(_hz_key)] = _meta_fi
+
     # --- Training data stats ---
     _train_stats = _load_training_stats()
     _csv_err = _train_stats.get("_error")
@@ -2444,6 +2473,11 @@ with tab5:
         # Fallback: use metadata rows_per_horizon if CSV stats missing
         if not _hz_rows and _model_meta.get("rows_per_horizon"):
             _hz_rows = _model_meta["rows_per_horizon"].get(str(_hz), 0)
+        # Fallback to global data span when CSV stats unavailable
+        if _hz_earliest is None:
+            _hz_earliest = _data_start
+        if _hz_latest is None:
+            _hz_latest = _data_end
 
         # Prediction history for this horizon
         if _mh_history is not None and len(_mh_history) > 0 and "Model" in _mh_history.columns:
@@ -2512,6 +2546,22 @@ with tab5:
                     _coverage = f"{_hz_earliest.strftime('%Y-%m-%d')} → {_hz_latest.strftime('%Y-%m-%d')}"
                 st.metric("Training data span", _coverage if _coverage else "—")
 
+            # Feature importance for this horizon
+            _hz_fi = _live_importances.get(str(_hz))
+            if not _hz_fi:
+                _meta_fi = _model_meta.get("feature_importance", {})
+                if _meta_fi:
+                    _is_per_hz = isinstance(next(iter(_meta_fi.values()), None), dict)
+                    _hz_fi = _meta_fi.get(str(_hz)) if _is_per_hz else _meta_fi or None
+            if _hz_fi:
+                st.markdown("**Top Features**")
+                _fi_df = pd.DataFrame(
+                    sorted(_hz_fi.items(), key=lambda x: x[1], reverse=True),
+                    columns=["Feature", "Importance"],
+                )
+                _fi_df["Importance"] = _fi_df["Importance"].map(lambda v: f"{v:.4f}")
+                st.dataframe(_fi_df, hide_index=True, use_container_width=True)
+
     st.divider()
 
     # --- Retraining guidance ---
@@ -2548,5 +2598,28 @@ with tab5:
                 hide_index=True,
                 use_container_width=True,
             )
+            _hist_with_fi = [e for e in _model_history if e.get("feature_importance")]
+            if _hist_with_fi:
+                st.divider()
+                st.markdown("**Feature Importance by Retrain**")
+                for _e in reversed(_hist_with_fi):  # newest first
+                    _fi_label = f"{_e.get('retrained_at_utc', '—')} — {_e.get('script', '—')}"
+                    with st.expander(_fi_label, expanded=False):
+                        _fi_data = _e["feature_importance"]
+                        _is_per_horizon = isinstance(next(iter(_fi_data.values()), None), dict)
+                        if _is_per_horizon:
+                            for _h_str in sorted(_fi_data.keys()):
+                                st.caption(f"Horizon {_h_str}min")
+                                _fi_df = pd.DataFrame(
+                                    sorted(_fi_data[_h_str].items(), key=lambda x: x[1], reverse=True),
+                                    columns=["Feature", "Importance"],
+                                )
+                                st.dataframe(_fi_df, hide_index=True, use_container_width=True)
+                        else:
+                            _fi_df = pd.DataFrame(
+                                sorted(_fi_data.items(), key=lambda x: x[1], reverse=True),
+                                columns=["Feature", "Importance"],
+                            )
+                            st.dataframe(_fi_df, hide_index=True, use_container_width=True)
         else:
             st.caption("No update history recorded yet. Run train_model.py or update_brain.py to begin tracking.")
