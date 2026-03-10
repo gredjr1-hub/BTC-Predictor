@@ -2900,7 +2900,7 @@ with tab6:
         )
     with _at_col2:
         _at_threshold = st.slider(
-            "Min Confidence (%)", min_value=55, max_value=90,
+            "Min Confidence (%)", min_value=50, max_value=90,
             value=60, step=1, key="at_threshold"
         )
     with _at_col3:
@@ -3073,7 +3073,8 @@ with tab6:
                             }
                             st.info(f"SELL {abs(_at_btc_change):.6f} BTC @ ${_at_entry_price:,.2f} | Received: ${_at_cash_change:.2f} | Conf: {_at_conf:.1f}%")
                 else:
-                    st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}%")
+                    _at_checked_at = datetime.utcnow().strftime("%H:%M:%S UTC")
+                    st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}% — last checked {_at_checked_at}")
 
             except Exception as _at_trade_err:
                 st.warning(f"Auto trader error: {_at_trade_err}")
