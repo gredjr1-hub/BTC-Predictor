@@ -765,7 +765,7 @@ with tab1:
                 if _seconds_left < 90:          # < 1.5 min → force 1-min model
                     _minutes_to_end = 1
                 else:
-                    _minutes_to_end = max(1, min(5, math.ceil(_seconds_left / 60)))
+                    _minutes_to_end = max(1, min(5, round(_seconds_left / 60)))
 
                 horizon_model = model[_minutes_to_end]
 
