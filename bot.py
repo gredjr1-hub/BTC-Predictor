@@ -5,9 +5,10 @@ import ccxt
 import joblib
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import os
+import requests
 
 # --- 1. Google Sheets Auth ---
 def get_sheet():
@@ -44,13 +45,40 @@ def get_data():
     df['BB_Upper'] = ta.volatility.bollinger_hband(df['Close'], window=20, window_dev=2)
     df['BB_Lower'] = ta.volatility.bollinger_lband(df['Close'], window=20, window_dev=2)
     df['Volume_ROC'] = df['Volume'].pct_change(periods=5)
-    df['Price_Delta_From_Window_Start'] = (df['Close'] - df['Close'].shift(5)) / df['Close'].shift(5)
-
+    
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
     return df
 
-# --- 3. Grade Pending Trades ---
+# --- 3. Polymarket Resolution ---
+def fetch_polymarket_resolution(target_time) -> str | None:
+    """Query Gamma API for a resolved 5-minute BTC window. Returns 'UP', 'DOWN', or None."""
+    try:
+        window_open = target_time - timedelta(minutes=5)
+        ts = int(window_open.replace(tzinfo=timezone.utc).timestamp())
+        slug = f"btc-updown-5m-{ts}"
+        r = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None
+        event = data[0] if isinstance(data, list) else data
+        markets = event.get("markets", [])
+        for mkt in markets:
+            if mkt.get("resolved"):
+                raw_outcomes = mkt.get("outcomes", "[]")
+                raw_prices = mkt.get("outcomePrices", "[]")
+                outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+                prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                for outcome, price in zip(outcomes, prices):
+                    if float(price) >= 0.99:
+                        return str(outcome).strip().upper()
+        return None
+    except Exception:
+        return None
+
+
+# --- 4. Grade Pending Trades ---
 def grade_trades(sheet, live_data):
     records = sheet.get_all_records()
     if not records: return
@@ -61,17 +89,29 @@ def grade_trades(sheet, live_data):
         if row['Outcome'] == 'Pending':
             # gspread returns strings, so we parse the target time
             target_time = pd.to_datetime(row['Target_Time'])
-            
+            prediction = row['Prediction']
+
+            # --- Try Polymarket resolution first ---
+            target_dt = target_time.to_pydatetime().replace(tzinfo=None)
+            pm_resolved = fetch_polymarket_resolution(target_dt)
+            if pm_resolved in ('UP', 'DOWN'):
+                outcome = 'Win' if pm_resolved == prediction else 'Loss'
+                ref_raw = row.get('PM_Strike_Price') or row.get('Window_Start_Price') or row.get('Entry_Price')
+                close_price = round(float(ref_raw), 2) if ref_raw else 0.0
+                sheet.update_cell(i + 2, 6, close_price)
+                sheet.update_cell(i + 2, 7, outcome)
+                continue
+
+            # --- Fall back to Kraken candles ---
             if target_time <= latest_live_time:
                 valid_candles = live_data[live_data.index >= target_time]
-                
+
                 if not valid_candles.empty:
                     actual_close = valid_candles['Close'].iloc[0]
                     entry = float(row['Entry_Price'])
-                    prediction = row['Prediction']
-                    
+
                     outcome = 'Win' if (prediction == 'UP' and actual_close > entry) or (prediction == 'DOWN' and actual_close < entry) else 'Loss'
-                    
+
                     # Update Google Sheet (i+2 accounts for 0-index and header row)
                     sheet.update_cell(i + 2, 6, round(actual_close, 2))
                     sheet.update_cell(i + 2, 7, outcome)
