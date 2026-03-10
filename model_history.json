@@ -1,0 +1,142 @@
+[
+  {
+    "retrained_at_utc": "2026-03-10 15:37:52",
+    "script": "update_brain.py",
+    "total_rows": 588866,
+    "new_rows_added": 600,
+    "data_start": "2024-03-05 02:31:00",
+    "data_end": "2026-03-10 15:37:00",
+    "feature_importance": {
+      "1": {
+        "RSI_14": 0.1289,
+        "MACD": 0.0182,
+        "MACD_Signal": 0.0099,
+        "EMA_9": 0.0015,
+        "EMA_21": 0.0015,
+        "BB_Upper": 0.0012,
+        "BB_Lower": 0.0017,
+        "Volume_ROC": 0.0062,
+        "price_change_since_window_start": 0.7636,
+        "price_change_abs": 0.0672
+      },
+      "2": {
+        "RSI_14": 0.1195,
+        "MACD": 0.018,
+        "MACD_Signal": 0.01,
+        "EMA_9": 0.0022,
+        "EMA_21": 0.002,
+        "BB_Upper": 0.0016,
+        "BB_Lower": 0.0028,
+        "Volume_ROC": 0.0103,
+        "price_change_since_window_start": 0.7454,
+        "price_change_abs": 0.0882
+      },
+      "3": {
+        "RSI_14": 0.0948,
+        "MACD": 0.0183,
+        "MACD_Signal": 0.0104,
+        "EMA_9": 0.003,
+        "EMA_21": 0.0043,
+        "BB_Upper": 0.0027,
+        "BB_Lower": 0.0037,
+        "Volume_ROC": 0.0178,
+        "price_change_since_window_start": 0.7473,
+        "price_change_abs": 0.0978
+      },
+      "4": {
+        "RSI_14": 0.1344,
+        "MACD": 0.0291,
+        "MACD_Signal": 0.0128,
+        "EMA_9": 0.007,
+        "EMA_21": 0.0093,
+        "BB_Upper": 0.0078,
+        "BB_Lower": 0.0101,
+        "Volume_ROC": 0.0241,
+        "price_change_since_window_start": 0.6707,
+        "price_change_abs": 0.0948
+      },
+      "5": {
+        "RSI_14": 0.513,
+        "MACD": 0.12,
+        "MACD_Signal": 0.0778,
+        "EMA_9": 0.0625,
+        "EMA_21": 0.0589,
+        "BB_Upper": 0.0458,
+        "BB_Lower": 0.0577,
+        "Volume_ROC": 0.0639,
+        "price_change_since_window_start": 0.0001,
+        "price_change_abs": 0.0002
+      }
+    }
+  },
+  {
+    "retrained_at_utc": "2026-03-10 15:41:34",
+    "script": "update_brain.py",
+    "total_rows": 588869,
+    "new_rows_added": 3,
+    "data_start": "2024-03-05 02:31:00",
+    "data_end": "2026-03-10 15:40:00",
+    "feature_importance": {
+      "1": {
+        "RSI_14": 0.1288,
+        "MACD": 0.0182,
+        "MACD_Signal": 0.0099,
+        "EMA_9": 0.0015,
+        "EMA_21": 0.0015,
+        "BB_Upper": 0.0012,
+        "BB_Lower": 0.0017,
+        "Volume_ROC": 0.0062,
+        "price_change_since_window_start": 0.7638,
+        "price_change_abs": 0.0672
+      },
+      "2": {
+        "RSI_14": 0.1196,
+        "MACD": 0.018,
+        "MACD_Signal": 0.01,
+        "EMA_9": 0.0022,
+        "EMA_21": 0.002,
+        "BB_Upper": 0.0016,
+        "BB_Lower": 0.0028,
+        "Volume_ROC": 0.0103,
+        "price_change_since_window_start": 0.7454,
+        "price_change_abs": 0.0881
+      },
+      "3": {
+        "RSI_14": 0.0948,
+        "MACD": 0.0183,
+        "MACD_Signal": 0.0104,
+        "EMA_9": 0.003,
+        "EMA_21": 0.0043,
+        "BB_Upper": 0.0027,
+        "BB_Lower": 0.0037,
+        "Volume_ROC": 0.0178,
+        "price_change_since_window_start": 0.7473,
+        "price_change_abs": 0.0978
+      },
+      "4": {
+        "RSI_14": 0.1344,
+        "MACD": 0.0291,
+        "MACD_Signal": 0.0128,
+        "EMA_9": 0.007,
+        "EMA_21": 0.0093,
+        "BB_Upper": 0.0078,
+        "BB_Lower": 0.0101,
+        "Volume_ROC": 0.0241,
+        "price_change_since_window_start": 0.6707,
+        "price_change_abs": 0.0948
+      },
+      "5": {
+        "RSI_14": 0.5132,
+        "MACD": 0.1193,
+        "MACD_Signal": 0.0787,
+        "EMA_9": 0.063,
+        "EMA_21": 0.0586,
+        "BB_Upper": 0.0458,
+        "BB_Lower": 0.0579,
+        "Volume_ROC": 0.0633,
+        "price_change_since_window_start": 0.0001,
+        "price_change_abs": 0.0002
+      }
+    }
+  }
+]
