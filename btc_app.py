@@ -2891,7 +2891,7 @@ with tab6:
     st.warning("⚠️ Beta — paper trading only. No real funds are used.")
 
     # ── Controls ─────────────────────────────────────────────────────────────
-    _at_col1, _at_col2, _at_col3 = st.columns(3)
+    _at_col1, _at_col2, _at_col3, _at_col4 = st.columns(4)
     with _at_col1:
         st.session_state.at_enabled = st.toggle(
             "Enable Auto Trader", value=st.session_state.at_enabled
@@ -2905,6 +2905,11 @@ with tab6:
         _at_max_pct = st.slider(
             "Max % per Trade", min_value=5, max_value=50,
             value=10, step=5, key="at_max_pct"
+        )
+    with _at_col4:
+        _at_dca_amount = st.number_input(
+            "DCA Buy Amount ($)", min_value=1.0, max_value=1000.0,
+            value=25.0, step=5.0, key="at_dca_amount"
         )
 
     # ── Restore balances + trade history from sheet on first load ────────────
@@ -3112,6 +3117,7 @@ with tab6:
 
         # ── Whaling simulation ────────────────────────────────────────────────
         _at_whale_vals = []
+        _at_whale_marker_dirs = []  # None if trade could not execute
         if _at_prices:
             _wh_btc  = 500.0 / _at_prices[0]
             _wh_cash = 500.0
@@ -3119,21 +3125,29 @@ with tab6:
                 if d == "BUY" and _wh_cash > 0:
                     _wh_btc  += _wh_cash / p
                     _wh_cash  = 0.0
+                    _at_whale_marker_dirs.append("BUY")
                 elif d == "SELL" and _wh_btc > 0:
                     _wh_cash += _wh_btc * p
                     _wh_btc   = 0.0
+                    _at_whale_marker_dirs.append("SELL")
+                else:
+                    _at_whale_marker_dirs.append(None)  # signal skipped — cash or BTC already 0
                 _at_whale_vals.append(round(_wh_cash + _wh_btc * p, 2))
 
         # ── DCA simulation ────────────────────────────────────────────────────
+        # Starts all-cash ($1000); buys a fixed amount per BUY signal; ignores SELL
         _at_dca_vals = []
-        _AT_DCA_AMOUNT = 500.0 * 0.025  # $12.50
+        _at_dca_marker_dirs = []  # None for SELL (ignored), "BUY" for buy signals
         if _at_prices:
-            _dc_btc  = 500.0 / _at_prices[0]
-            _dc_cash = 500.0
+            _dc_btc  = 0.0
+            _dc_cash = 1000.0
             for d, p in zip(_at_dirs, _at_prices):
-                if d == "BUY" and _dc_cash >= _AT_DCA_AMOUNT:
-                    _dc_btc  += _AT_DCA_AMOUNT / p
-                    _dc_cash -= _AT_DCA_AMOUNT
+                if d == "BUY" and _dc_cash >= _at_dca_amount:
+                    _dc_btc  += _at_dca_amount / p
+                    _dc_cash -= _at_dca_amount
+                    _at_dca_marker_dirs.append("BUY")
+                else:
+                    _at_dca_marker_dirs.append(None)  # SELL or insufficient cash → no marker
                 _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
 
         # ── Chart helpers ─────────────────────────────────────────────────────
@@ -3145,9 +3159,11 @@ with tab6:
             _m3.metric("BTC Held", f"{btc:.6f} BTC" if btc else "—")
             _m4.metric("BTC Value", f"${btc * current_price:,.2f}")
 
-        def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals):
-            colors  = ["#00c896" if d == "BUY" else "#ff4b4b" for d in dirs]
-            symbols = ["triangle-up" if d == "BUY" else "triangle-down" for d in dirs]
+        def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals, marker_dirs=None):
+            _mds    = marker_dirs if marker_dirs is not None else dirs
+            colors  = ["#00c896" if d == "BUY" else ("#ff4b4b" if d == "SELL" else "rgba(120,120,120,0.4)") for d in _mds]
+            symbols = ["triangle-up" if d == "BUY" else ("triangle-down" if d == "SELL" else "circle") for d in _mds]
+            sizes   = [12 if d else 5 for d in _mds]
             hover = [
                 f"{times[i]}<br>{dirs[i]} | Conf: {confs[i]:.1f}%<br>"
                 f"Price: ${prices[i]:,.2f}<br>Portfolio: ${pvals[i]:,.2f}"
@@ -3157,7 +3173,7 @@ with tab6:
             fig.add_trace(go.Scatter(
                 x=times, y=pvals, mode="lines+markers",
                 line=dict(color="#7c8cf8", width=2),
-                marker=dict(color=colors, symbol=symbols, size=12,
+                marker=dict(color=colors, symbol=symbols, size=sizes,
                             line=dict(width=1, color="white")),
                 hovertext=hover, hoverinfo="text", name="Portfolio Value",
             ))
@@ -3208,14 +3224,14 @@ with tab6:
             )
             st.plotly_chart(
                 _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals),
+                               _at_confs, _at_prices, _at_hold_vals, _at_whale_marker_dirs),
                 use_container_width=True,
             )
 
             # ── DCA ───────────────────────────────────────────────────────────
             st.markdown("#### DCA")
             st.caption(
-                f"Buys a fixed $12.50 (2.5% of $500 starting cash) on every BUY signal; ignores SELL signals. "
+                f"Starts with $1,000 cash (no BTC). Buys ${_at_dca_amount:,.2f} worth of BTC on every BUY signal; ignores SELL signals. "
                 f"Min confidence: {_at_threshold}%."
             )
             _render_at_metrics(
@@ -3223,7 +3239,7 @@ with tab6:
             )
             st.plotly_chart(
                 _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals),
+                               _at_confs, _at_prices, _at_hold_vals, _at_dca_marker_dirs),
                 use_container_width=True,
             )
 
