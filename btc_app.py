@@ -700,6 +700,14 @@ if "at_btc_seeded" not in st.session_state:
     st.session_state.at_btc_seeded = False
 if "at_trade_log" not in st.session_state:
     st.session_state.at_trade_log = []
+if "at_last_buy_time" not in st.session_state:
+    st.session_state.at_last_buy_time = None   # datetime of last executed BUY
+if "at_last_sell_time" not in st.session_state:
+    st.session_state.at_last_sell_time = None  # datetime of last executed SELL
+if "at_last_buy_conf" not in st.session_state:
+    st.session_state.at_last_buy_conf = 0.0    # confidence of last executed BUY
+if "at_last_sell_conf" not in st.session_state:
+    st.session_state.at_last_sell_conf = 0.0   # confidence of last executed SELL
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔮 Live Predictor",
@@ -3002,10 +3010,26 @@ with tab6:
             _at_direction = "BUY" if _at_pred_val == 1 else "SELL"
             _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
 
-            if _at_conf >= _at_threshold:
-                _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+            # ── Rate-limiting gate ────────────────────────────────────────────
+            _at_now = datetime.utcnow()
+            if _at_direction == "BUY":
+                _at_rl_time = st.session_state.at_last_buy_time
+                _at_rl_conf = st.session_state.at_last_buy_conf
+            else:
+                _at_rl_time = st.session_state.at_last_sell_time
+                _at_rl_conf = st.session_state.at_last_sell_conf
+
+            _at_can_trade = (
+                _at_rl_time is None
+                or (_at_now - _at_rl_time).total_seconds() >= 60
+                or _at_conf > _at_rl_conf
+            )
+
+            if _at_can_trade:
+                # Size by confidence relative to 50% baseline (random floor)
+                _at_factor = max(0.0, (_at_conf / 100.0 - 0.5) / 0.5)
                 _at_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
-                _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                _at_trade_time_str = _at_now.strftime("%Y-%m-%d %H:%M:%S")
 
                 if _at_direction == "BUY":
                     _at_cash_used = round(st.session_state.at_cash * _at_pct, 2)
@@ -3032,6 +3056,8 @@ with tab6:
                             "Model_Used": "5min",
                         }
                         st.session_state.at_trade_log.insert(0, _at_log_entry)
+                        st.session_state.at_last_buy_time = _at_now
+                        st.session_state.at_last_buy_conf = _at_conf
 
                         try:
                             _at_ws = get_autotrader_sheet()
@@ -3049,7 +3075,7 @@ with tab6:
 
                         st.info(f"BUY {_at_btc_change:.6f} BTC @ ${_at_entry_price:,.2f} | Spent: ${abs(_at_cash_change):.2f} | Conf: {_at_conf:.1f}%")
 
-                else:  # DOWN
+                else:  # SELL
                     _at_btc_sold = round(st.session_state.at_btc * _at_pct, 8)
                     if _at_btc_sold * _at_entry_price < 1.0:
                         st.caption("No trade: insufficient BTC")
@@ -3074,6 +3100,8 @@ with tab6:
                             "Model_Used": "5min",
                         }
                         st.session_state.at_trade_log.insert(0, _at_log_entry)
+                        st.session_state.at_last_sell_time = _at_now
+                        st.session_state.at_last_sell_conf = _at_conf
 
                         try:
                             _at_ws = get_autotrader_sheet()
@@ -3091,8 +3119,12 @@ with tab6:
 
                         st.info(f"SELL {abs(_at_btc_change):.6f} BTC @ ${_at_entry_price:,.2f} | Received: ${_at_cash_change:.2f} | Conf: {_at_conf:.1f}%")
             else:
-                _at_checked_at = datetime.utcnow().strftime("%H:%M:%S UTC")
-                st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}% — last checked {_at_checked_at}")
+                _at_checked_at = _at_now.strftime("%H:%M:%S UTC")
+                _at_elapsed = int((_at_now - _at_rl_time).total_seconds())
+                st.caption(
+                    f"Rate limited: {_at_direction} @ {_at_conf:.1f}% "
+                    f"(last {_at_direction}: {_at_rl_conf:.1f}%, {_at_elapsed}s ago) — {_at_checked_at}"
+                )
 
         except Exception as _at_trade_err:
             st.warning(f"Auto trader error: {_at_trade_err}")
