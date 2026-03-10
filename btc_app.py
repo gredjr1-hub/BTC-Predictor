@@ -3161,6 +3161,34 @@ with tab6:
                     _at_dca_marker_dirs.append(None)  # SELL or insufficient cash → no marker
                 _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
 
+        # ── Partial-sizing simulation (Buy/Sell chart) ────────────────────────
+        # Re-runs actual strategy with current _at_max_pct; starts $1,000 cash
+        _at_partial_vals = []
+        _at_partial_marker_dirs = []
+        if _at_prices:
+            _pt_btc  = 0.0
+            _pt_cash = 1000.0
+            for _ptd, _ptc, _ptp in zip(_at_dirs, _at_confs, _at_prices):
+                _pt_factor = (_ptc / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+                _pt_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _pt_factor)
+                if _ptd == "BUY":
+                    _pt_cash_used = round(_pt_cash * _pt_pct, 2)
+                    if _pt_cash_used >= 1.0:
+                        _pt_btc  += _pt_cash_used / _ptp
+                        _pt_cash -= _pt_cash_used
+                        _at_partial_marker_dirs.append("BUY")
+                    else:
+                        _at_partial_marker_dirs.append(None)
+                else:  # SELL
+                    _pt_btc_sold = round(_pt_btc * _pt_pct, 8)
+                    if _pt_btc_sold * _ptp >= 1.0:
+                        _pt_cash += _pt_btc_sold * _ptp
+                        _pt_btc  -= _pt_btc_sold
+                        _at_partial_marker_dirs.append("SELL")
+                    else:
+                        _at_partial_marker_dirs.append(None)
+                _at_partial_vals.append(round(_pt_cash + _pt_btc * _ptp, 2))
+
         # ── Chart helpers ─────────────────────────────────────────────────────
         def _render_at_metrics(portfolio_val, cash, btc, current_price):
             _m1, _m2, _m3, _m4 = st.columns(4)
@@ -3213,14 +3241,14 @@ with tab6:
                 f"Min confidence: {_at_threshold}%."
             )
             _render_at_metrics(
-                _at_pvals[-1],
-                _at_last["Cash_Balance"],
-                _at_last["BTC_Balance"],
+                _at_partial_vals[-1],
+                _pt_cash,
+                _pt_btc,
                 _at_current_price,
             )
             st.plotly_chart(
-                _make_at_chart("Buy and Sell", _at_pvals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals),
+                _make_at_chart("Buy and Sell", _at_partial_vals, _at_times, _at_dirs,
+                               _at_confs, _at_prices, _at_hold_vals, _at_partial_marker_dirs),
                 use_container_width=True,
             )
 
