@@ -1,0 +1,17 @@
+{
+  "retrained_at_utc": "2026-03-10 15:00:35",
+  "script": "train_model.py",
+  "total_rows": 588266,
+  "rows_per_horizon": {
+    "1": 111518,
+    "2": 114424,
+    "3": 114987,
+    "4": 120814,
+    "5": 126523
+  },
+  "data_start": "2024-03-05 02:31:00",
+  "data_end": "2026-03-05 01:57:00",
+  "new_rows_added": null,
+  "previous_total_rows": null,
+  "previous_retrained_at_utc": null
+}

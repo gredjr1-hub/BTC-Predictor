@@ -2344,8 +2344,9 @@ with tab5:
 
     # --- Training data stats ---
     _train_stats = _load_training_stats()
-    if _train_stats.get("_error"):
-        st.warning(f"Could not load training CSV: {_train_stats['_error']}")
+    _csv_err = _train_stats.get("_error")
+    if _csv_err and "FileNotFoundError" not in _csv_err and "No such file" not in _csv_err:
+        st.warning(f"Could not load training CSV: {_csv_err}")
     _valid_stats = {k: v for k, v in _train_stats.items() if k != "_error"}
     _total_train_rows = sum(v["rows"] for v in _valid_stats.values()) if _valid_stats else 0
     _all_earliests = [v["earliest"] for v in _valid_stats.values() if v.get("earliest") is not None]
@@ -2355,12 +2356,12 @@ with tab5:
 
     # --- Prefer metadata timestamp; fall back to file mtime ---
     if _model_meta.get("retrained_at_utc"):
-        _retrain_display = _model_meta["retrained_at_utc"] + " UTC"
+        _retrain_display = _model_meta["retrained_at_utc"][:10]   # "YYYY-MM-DD"
         _retrain_dt = datetime.strptime(_model_meta["retrained_at_utc"], "%Y-%m-%d %H:%M:%S")
         _mf_age_days = (datetime.utcnow() - _retrain_dt).days
         _mf_age_str = f"{_mf_age_days}d ago" if _mf_age_days > 0 else "today"
     else:
-        _retrain_display = _mf_mtime.strftime("%Y-%m-%d %H:%M:%S UTC") if _mf_mtime else "—"
+        _retrain_display = _mf_mtime.strftime("%Y-%m-%d") if _mf_mtime else "—"
 
     # --- Fallback to metadata row counts if CSV stats unavailable ---
     if not _total_train_rows and _model_meta.get("total_rows"):
