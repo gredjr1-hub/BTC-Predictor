@@ -1619,10 +1619,24 @@ with tab3:
     if "_pl_apply_pending" in st.session_state:
         _pa = st.session_state.pop("_pl_apply_pending")
         st.session_state["pl_time"] = _pa["time"]
-        st.session_state["pl_odds_bucket"] = _pa["bucket"]
         st.session_state["pl_dir"] = _pa["dir"]
         st.session_state["pl_model"] = _pa["model"]
         st.session_state["pl_min_conf"] = _pa["min_conf"]
+        if "skip_rules" in _pa:
+            st.session_state["pl_skip_rules"] = _pa["skip_rules"]
+        if "bet_scaling" in _pa:
+            st.session_state["pl_bet_scaling"] = _pa["bet_scaling"]
+        # Map optimizer-only buckets (e.g. "≥60%") to Custom with numeric bounds
+        _pa_bucket = _pa["bucket"]
+        _pa_range = _pa.get("bucket_range")
+        _pl_bucket_opts_check = ["All", ">50%", "<50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+", "Custom"]
+        if _pa_bucket in _pl_bucket_opts_check:
+            st.session_state["pl_odds_bucket"] = _pa_bucket
+        else:
+            st.session_state["pl_odds_bucket"] = "Custom"
+            if _pa_range:
+                st.session_state["pl_cust_lo_pct"] = int(_pa_range[0] * 100)
+                st.session_state["pl_cust_hi_pct"] = min(100, int(_pa_range[1] * 100))
 
     st.markdown("### 💰 P&L Simulator")
     st.markdown(
@@ -1635,15 +1649,19 @@ with tab3:
     # Load history (may already be loaded in tab2 context, but tabs are independent blocks)
     sim_history, _ = load_history_from_sheets()
 
+    if "pl_skip_rules" not in st.session_state:
+        st.session_state["pl_skip_rules"] = True
+    if "pl_bet_scaling" not in st.session_state:
+        st.session_state["pl_bet_scaling"] = True
     _apply_skip_rules = st.toggle(
         "Apply skip rules (high-odds / low-confidence filter)",
-        value=True,
+        key="pl_skip_rules",
         help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
              "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
     )
     _apply_bet_scaling = st.toggle(
         "Apply bet scaling (contrarian bets scale 2.5–5% by confidence)",
-        value=True,
+        key="pl_bet_scaling",
         help="When ON, contrarian bets (market odds <50%) scale from 2.5% to 5% based on AI confidence. "
              "Toggle OFF to apply flat 2.5% to every bet for clean P&L comparison.",
     )
@@ -1794,6 +1812,8 @@ with tab3:
                     if "Model" in _opt_base.columns else ["All"]
                 )
                 _opt_conf_vals = [50, 55, 60, 65, 70, 75, 80]
+                _opt_skip_vals = [True, False]
+                _opt_scale_vals = [True, False]
 
                 _best_bal = 1000.0
                 _best_params = None
@@ -1814,44 +1834,57 @@ with tab3:
                                     _s5 = _s4[_s4["Confidence"] >= _omc].copy() if (_omc > 50 and "Confidence" in _s4.columns) else _s4.copy()
                                     if len(_s5) < 5:
                                         continue
-                                    _obal, _on = _quick_pl_sim(_s5, apply_skip_rules=True)
-                                    if _obal > _best_bal:
-                                        _best_bal = _obal
-                                        _best_params = {
-                                            "time": _otw, "bucket": _obk,
-                                            "dir": _odir, "model": _omdl,
-                                            "min_conf": float(_omc),
-                                            "balance": _obal, "n": _on,
-                                            "roi": (_obal - 1000.0) / 1000.0 * 100,
-                                        }
+                                    for _oskip in _opt_skip_vals:
+                                        for _oscale in _opt_scale_vals:
+                                            _obal, _on = _quick_pl_sim(_s5, apply_skip_rules=_oskip, apply_bet_scaling=_oscale)
+                                            if _obal > _best_bal:
+                                                _best_bal = _obal
+                                                _best_params = {
+                                                    "time": _otw, "bucket": _obk,
+                                                    "bucket_range": _obk_r,
+                                                    "dir": _odir, "model": _omdl,
+                                                    "min_conf": float(_omc),
+                                                    "skip_rules": _oskip,
+                                                    "bet_scaling": _oscale,
+                                                    "balance": _obal, "n": _on,
+                                                    "roi": (_obal - 1000.0) / 1000.0 * 100,
+                                                }
 
                 st.session_state["pl_opt_result"] = _best_params
 
         if st.session_state.get("pl_opt_result"):
             _r = st.session_state["pl_opt_result"]
+            _skip_label = "skip rules ON" if _r.get("skip_rules", True) else "skip rules OFF"
+            _scale_label = "bet scaling ON" if _r.get("bet_scaling", True) else "bet scaling OFF"
             _opt_result_col.success(
                 f"**Best found:** {_r['time']} · {_r['bucket']} odds · "
                 f"{_r['dir']} direction · {_r['model']} model · "
-                f"Min conf {_r['min_conf']:.0f}% → "
+                f"Min conf {_r['min_conf']:.0f}% · {_skip_label} · {_scale_label} → "
                 f"**${_r['balance']:,.2f}** ({_r['roi']:+.1f}% ROI, {_r['n']} trades)"
             )
             st.markdown(
                 f"#### 🔍 Optimizer Recommendation\n\n"
                 f"The auto-optimizer tested all combinations of time window, odds bucket, direction, "
-                f"model, and confidence threshold. The highest simulated P&L was achieved with:\n\n"
+                f"model, confidence threshold, skip rules, and bet scaling. "
+                f"The highest simulated P&L was achieved with:\n\n"
                 f"- **Time window:** {_r['time']}\n"
                 f"- **Odds bucket:** {_r['bucket']}\n"
                 f"- **Direction:** {_r['dir']}\n"
                 f"- **Model:** {_r['model']}\n"
-                f"- **Min confidence:** {_r['min_conf']:.0f}%\n\n"
+                f"- **Min confidence:** {_r['min_conf']:.0f}%\n"
+                f"- **Skip rules:** {'ON' if _r.get('skip_rules', True) else 'OFF'}\n"
+                f"- **Bet scaling:** {'ON' if _r.get('bet_scaling', True) else 'OFF'}\n\n"
                 f"Simulated result: **${_r['balance']:,.2f}** balance (**{_r['roi']:+.1f}% ROI**) "
-                f"over **{_r['n']}** executed trades (skip rules applied). "
+                f"over **{_r['n']}** executed trades. "
                 f"This is the historically optimal configuration — it may not generalise to future trades."
             )
             if st.button("✅ Apply Optimal Filters"):
                 st.session_state["_pl_apply_pending"] = {
                     "time": _r["time"], "bucket": _r["bucket"],
+                    "bucket_range": _r.get("bucket_range"),
                     "dir": _r["dir"], "model": _r["model"], "min_conf": _r["min_conf"],
+                    "skip_rules": _r.get("skip_rules", True),
+                    "bet_scaling": _r.get("bet_scaling", True),
                 }
                 st.rerun()
         elif not _run_opt:
