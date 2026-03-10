@@ -417,11 +417,20 @@ def _ensure_sheet_headers(sheet):
         sheet.update_cell(r, c, v)
 
 
+def _get_cached_sheet():
+    """Open the worksheet once per session and reuse — avoids repeated open() API reads."""
+    if "_sheet_obj" not in st.session_state:
+        client = get_gspread_client()
+        st.session_state["_sheet_obj"] = client.open("BTC_AI_Tracker").sheet1
+    return st.session_state["_sheet_obj"]
+
+
 def load_history_from_sheets():
     try:
-        client = get_gspread_client()
-        sheet = client.open("BTC_AI_Tracker").sheet1
-        _ensure_sheet_headers(sheet)
+        sheet = _get_cached_sheet()
+        if not st.session_state.get("_headers_ensured"):
+            _ensure_sheet_headers(sheet)
+            st.session_state["_headers_ensured"] = True
         records = _fetch_sheet_records()
 
         if not records:
@@ -447,7 +456,19 @@ def load_history_from_sheets():
             if _col not in df.columns:
                 df[_col] = ""
 
-        return df, sheet
+        result = (df, sheet)
+        st.session_state["_last_sheet_data"] = result
+        return result
+    except gspread.exceptions.APIError as e:
+        if "429" in str(e):
+            last = st.session_state.get("_last_sheet_data")
+            if last is not None:
+                if not st.session_state.get("_429_warned"):
+                    st.warning("⚠️ Google Sheets rate limit reached — showing last cached data.")
+                    st.session_state["_429_warned"] = True
+                return last
+        st.error(f"Failed to connect to Google Sheets: {e}")
+        return pd.DataFrame(), None
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets: {e}")
         return pd.DataFrame(), None
@@ -534,6 +555,8 @@ def resolve_pending_trades_in_sheets(history_df, sheet, live_data=None):
         if pm_resolution:
             sheet.update_cell(idx + 2, 10, pm_resolution)                              # col J = PM_Resolution
         _fetch_sheet_records.clear()
+        st.session_state.pop("_sheet_obj", None)
+        st.session_state.pop("_headers_ensured", None)
 
     return history_df
 
@@ -642,6 +665,8 @@ def live_market_and_advanced_stats_fragment(
 
 
 # --- 7. UI Layout (Tabs) ---
+# Reset per-cycle warning flag so the 429 warning shows once per render cycle, not 4×
+st.session_state.pop("_429_warned", None)
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔮 Live Predictor",
     "📊 Analytics & 24h Visualizer",
@@ -866,6 +891,8 @@ with tab1:
                         ]
                         sheet.append_row(new_row)
                         _fetch_sheet_records.clear()   # invalidate read cache so other tabs see new row
+                        st.session_state.pop("_sheet_obj", None)
+                        st.session_state.pop("_headers_ensured", None)
                         st.success("✅ Prediction successfully logged to Google Sheets!")
 
                     st.session_state.last_auto_target = target_time
@@ -914,6 +941,8 @@ with tab2:
                             _sheet2.update_cell(idx + 2, 10, pm_res)
                         _filled += 1
                 _fetch_sheet_records.clear()
+                st.session_state.pop("_sheet_obj", None)
+                st.session_state.pop("_headers_ensured", None)
             st.success(f"Backfilled PM_Resolution for {_filled} row(s).")
             st.rerun()
 
