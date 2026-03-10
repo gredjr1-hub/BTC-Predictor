@@ -985,6 +985,107 @@ with tab1:
                 help="BTC price to beat — parsed from the Polymarket market question for this window.",
             )
 
+    # ── Tick-by-tick BTC price chart (full-width, resets each window) ─────────
+    st.markdown("##### 📈 BTC Price — Current Window")
+
+    if "btc_tick_history" not in st.session_state:
+        st.session_state.btc_tick_history = []
+    if "btc_tick_window" not in st.session_state:
+        st.session_state.btc_tick_window = None
+
+    # Reset history when the window rolls over
+    if st.session_state.btc_tick_window != _t1_current_window:
+        st.session_state.btc_tick_history = []
+        st.session_state.btc_tick_window = _t1_current_window
+
+    # Append current tick (de-duplicate: only add if price or timestamp changed)
+    if _t1_live_price_val is not None:
+        _last_tick = st.session_state.btc_tick_history[-1] if st.session_state.btc_tick_history else None
+        if _last_tick is None or _last_tick["price"] != float(_t1_live_price_val):
+            st.session_state.btc_tick_history.append({
+                "ts": datetime.utcnow(),
+                "price": float(_t1_live_price_val),
+            })
+
+    # Determine the strike / reference price for the horizontal line:
+    # Prefer Polymarket's price_to_beat (exact oracle strike); fall back to first tick (window open proxy).
+    _btc_strike = None
+    if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
+        _btc_strike = float(_t1_live_odds["price_to_beat"])
+    elif st.session_state.btc_tick_history:
+        _btc_strike = st.session_state.btc_tick_history[0]["price"]
+
+    if st.session_state.btc_tick_history:
+        import plotly.graph_objects as _go_btc
+        _btc_hist = st.session_state.btc_tick_history
+        _btc_times = [h["ts"] for h in _btc_hist]
+        _btc_prices = [h["price"] for h in _btc_hist]
+
+        # Tight y-axis: include strike in range, add padding
+        _btc_all_vals = _btc_prices + ([_btc_strike] if _btc_strike else [])
+        _btc_lo = min(_btc_all_vals)
+        _btc_hi = max(_btc_all_vals)
+        _btc_pad = max((_btc_hi - _btc_lo) * 0.35, 15)  # at least $15, 35% of spread
+
+        # Colour: green if current price is above strike, red if below
+        _btc_above = (_btc_strike is None) or (_btc_prices[-1] >= _btc_strike)
+        _line_col = "rgba(0,255,120,0.9)" if _btc_above else "rgba(255,80,80,0.9)"
+        _fill_col = "rgba(0,255,120,0.07)" if _btc_above else "rgba(255,80,80,0.07)"
+
+        _fig_btc = _go_btc.Figure()
+        _fig_btc.add_trace(_go_btc.Scatter(
+            x=_btc_times,
+            y=_btc_prices,
+            mode="lines",
+            name="BTC/USD",
+            line=dict(color=_line_col, width=2),
+            fill="tozeroy",
+            fillcolor=_fill_col,
+        ))
+
+        if _btc_strike:
+            _fig_btc.add_hline(
+                y=_btc_strike,
+                line_dash="dash",
+                line_color="gold",
+                line_width=1.5,
+                annotation_text=f"Strike  ${_btc_strike:,.2f}",
+                annotation_position="top right",
+                annotation_font_color="gold",
+                annotation_font_size=12,
+            )
+
+        # Pin x-axis to the full 5-minute window so the chart doesn't stretch oddly
+        _win_start_dt = _t1_current_window - timedelta(minutes=5)
+        _fig_btc.update_layout(
+            height=300,
+            margin=dict(l=0, r=0, t=10, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="white"),
+            showlegend=False,
+            xaxis=dict(
+                range=[_win_start_dt, _t1_current_window],
+                gridcolor="rgba(255,255,255,0.07)",
+                tickformat="%H:%M:%S",
+            ),
+            yaxis=dict(
+                range=[_btc_lo - _btc_pad, _btc_hi + _btc_pad],
+                gridcolor="rgba(255,255,255,0.07)",
+                tickprefix="$",
+                tickformat=",.0f",
+            ),
+        )
+        st.plotly_chart(_fig_btc, use_container_width=True)
+
+        _btc_n = len(_btc_hist)
+        _btc_elapsed = int((datetime.utcnow() - _win_start_dt).total_seconds())
+        _btc_remaining = max(0, 300 - _btc_elapsed)
+        _btc_rm, _btc_rs = divmod(_btc_remaining, 60)
+        st.caption(f"{_btc_n} tick{'s' if _btc_n != 1 else ''} this window · {_btc_rm}m {_btc_rs:02d}s remaining · refreshes every 10s")
+    else:
+        st.caption("Collecting price ticks… chart appears after the first reading.")
+
 with tab2:
     st.markdown("### Model Performance Analytics")
 
