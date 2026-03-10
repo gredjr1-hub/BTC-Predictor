@@ -5,6 +5,7 @@ import ta
 import ccxt
 import os
 import joblib
+import math
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
@@ -756,15 +757,15 @@ with tab1:
                         )
                     st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
 
-                # Seconds-precise model selection
+                # Seconds-precise model selection — derived from wall-clock seconds left,
+                # NOT from current_time.minute (candle timestamp can lag by 1–3 min).
                 _now = datetime.utcnow()
                 _seconds_left = max(0, int((target_time - _now).total_seconds()))
 
-                if _seconds_left < 90:          # < 1.5 min → use 1-min model
+                if _seconds_left < 90:          # < 1.5 min → force 1-min model
                     _minutes_to_end = 1
                 else:
-                    _now_minute = current_time.minute % 5
-                    _minutes_to_end = max(1, 5 - int(_now_minute))
+                    _minutes_to_end = max(1, min(5, math.ceil(_seconds_left / 60)))
 
                 horizon_model = model[_minutes_to_end]
 
