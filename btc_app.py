@@ -3136,7 +3136,15 @@ with tab6:
                     _dc_cash -= _AT_DCA_AMOUNT
                 _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
 
-        # ── Chart helper ──────────────────────────────────────────────────────
+        # ── Chart helpers ─────────────────────────────────────────────────────
+        def _render_at_metrics(portfolio_val, cash, btc, current_price):
+            _m1, _m2, _m3, _m4 = st.columns(4)
+            _m1.metric("Portfolio Value", f"${portfolio_val:,.2f}",
+                       delta=f"${portfolio_val - 1000.0:+,.2f}")
+            _m2.metric("Cash", f"${cash:,.2f}")
+            _m3.metric("BTC Held", f"{btc:.6f} BTC" if btc else "—")
+            _m4.metric("BTC Value", f"${btc * current_price:,.2f}")
+
         def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals):
             colors  = ["#00c896" if d == "BUY" else "#ff4b4b" for d in dirs]
             symbols = ["triangle-up" if d == "BUY" else "triangle-down" for d in dirs]
@@ -3169,19 +3177,50 @@ with tab6:
             return fig
 
         if _at_chart_data:
-            # Chart 1: Buy and Sell (actual bot)
+            _at_last = _at_chart_data[-1]
+
+            # ── Buy and Sell ──────────────────────────────────────────────────
+            st.markdown("#### Buy and Sell")
+            st.caption(
+                f"Partial sizing: spends/sells up to {_at_max_pct}% of holdings per signal. "
+                f"Min confidence: {_at_threshold}%."
+            )
+            _render_at_metrics(
+                _at_pvals[-1],
+                _at_last["Cash_Balance"],
+                _at_last["BTC_Balance"],
+                _at_current_price,
+            )
             st.plotly_chart(
                 _make_at_chart("Buy and Sell", _at_pvals, _at_times, _at_dirs,
                                _at_confs, _at_prices, _at_hold_vals),
                 use_container_width=True,
             )
-            # Chart 2: Whaling
+
+            # ── Whaling ───────────────────────────────────────────────────────
+            st.markdown("#### Whaling")
+            st.caption(
+                f"All-in on every BUY signal (full cash → BTC); all-out on every SELL (full BTC → cash). "
+                f"Min confidence: {_at_threshold}%."
+            )
+            _render_at_metrics(
+                _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
+            )
             st.plotly_chart(
                 _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
                                _at_confs, _at_prices, _at_hold_vals),
                 use_container_width=True,
             )
-            # Chart 3: DCA
+
+            # ── DCA ───────────────────────────────────────────────────────────
+            st.markdown("#### DCA")
+            st.caption(
+                f"Buys a fixed $12.50 (2.5% of $500 starting cash) on every BUY signal; ignores SELL signals. "
+                f"Min confidence: {_at_threshold}%."
+            )
+            _render_at_metrics(
+                _at_dca_vals[-1], _dc_cash, _dc_btc, _at_current_price,
+            )
             st.plotly_chart(
                 _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
                                _at_confs, _at_prices, _at_hold_vals),
