@@ -426,6 +426,12 @@ def _get_cached_sheet():
     return st.session_state["_sheet_obj"]
 
 
+_AT_SHEET_HEADERS = [
+    "Trade_Time", "Direction", "Confidence", "Price",
+    "BTC_Change", "Cash_Change", "BTC_Balance", "Cash_Balance",
+    "Portfolio_Value", "Model_Used",
+]
+
 @st.cache_resource
 def get_autotrader_sheet():
     """Returns the AutoTrader worksheet, creating it if needed."""
@@ -433,11 +439,15 @@ def get_autotrader_sheet():
         ws_main = get_gspread_client().open("BTC_AI_Tracker")
         try:
             ws = ws_main.worksheet("AutoTrader")
+            # Sync headers if outdated
+            try:
+                if ws.row_values(1) != _AT_SHEET_HEADERS:
+                    ws.update("A1", [_AT_SHEET_HEADERS])
+            except Exception:
+                pass
         except gspread.WorksheetNotFound:
             ws = ws_main.add_worksheet("AutoTrader", rows=1000, cols=10)
-            ws.append_row(["Trade_Time", "Direction", "Confidence", "Price",
-                           "BTC_Change", "Cash_Change", "BTC_Balance", "Cash_Balance",
-                           "Portfolio_Value", "Model_Used"])
+            ws.update("A1", [_AT_SHEET_HEADERS])
         return ws
     except Exception:
         return None
