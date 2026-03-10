@@ -175,7 +175,7 @@ def fetch_polymarket_odds(target_time):
         return None
 
 
-def fetch_polymarket_resolution(target_time) -> str | None:
+def fetch_polymarket_resolution(target_time, require_closed: bool = True) -> str | None:
     """
     Query Gamma API for a settled 5-minute BTC window.
     target_time: the window close time (UTC-naive datetime).
@@ -198,7 +198,7 @@ def fetch_polymarket_resolution(target_time) -> str | None:
         event = data[0] if isinstance(data, list) else data
 
         # Only attempt to read resolution from closed markets
-        if not event.get("closed"):
+        if require_closed and not event.get("closed"):
             return None
 
         markets = event.get("markets", [])
@@ -926,6 +926,7 @@ with tab2:
         if st.button("🔁 Backfill PM_Resolution", help="Fetch Polymarket UP/DOWN outcome for all rows that are missing it — including already-resolved Win/Loss rows"):
             with st.spinner("Backfilling PM_Resolution from Gamma API…"):
                 _filled = 0
+                _attempted = 0
                 _missing_mask = (
                     history["PM_Resolution"].isna() | (history["PM_Resolution"].astype(str).str.strip() == "")
                 ) if "PM_Resolution" in history.columns else pd.Series(True, index=history.index)
@@ -934,7 +935,8 @@ with tab2:
                     target_time = row.get("Target_Time")
                     if pd.isna(target_time) or target_time > datetime.utcnow():
                         continue
-                    pm_res = fetch_polymarket_resolution(target_time)
+                    _attempted += 1
+                    pm_res = fetch_polymarket_resolution(target_time, require_closed=False)
                     if pm_res in ("UP", "DOWN"):
                         history.at[idx, "PM_Resolution"] = pm_res
                         if _sheet2:
@@ -943,7 +945,7 @@ with tab2:
                 _fetch_sheet_records.clear()
                 st.session_state.pop("_sheet_obj", None)
                 st.session_state.pop("_headers_ensured", None)
-            st.success(f"Backfilled PM_Resolution for {_filled} row(s).")
+            st.success(f"Backfilled PM_Resolution for {_filled} of {_attempted} row(s) attempted.")
             st.rerun()
 
     _exclude_pre_odds = st.toggle(
