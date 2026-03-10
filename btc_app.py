@@ -583,6 +583,7 @@ def live_market_and_advanced_stats_fragment(
     down_wr,
     avg_conf_win,
     avg_conf_loss,
+    never_lost_above=None,
 ):
     """Only this section reruns every 2 seconds while the session is active."""
     st.markdown("#### 📊 Advanced Stats")
@@ -597,6 +598,16 @@ def live_market_and_advanced_stats_fragment(
             st.write(f"- Top 10% Conf Win Rate: **{p90_wr:.1f}%** *(>={p90_threshold:.1f}% Conf)*")
         else:
             st.write("- Top 10% Conf Win Rate: **N/A**")
+
+        if never_lost_above is not None:
+            _nla_thresh, _nla_n, _nla_perfect = never_lost_above
+            if _nla_perfect:
+                st.write(f"- 🏆 **Never Lost:** Perfect record across all {_nla_n} trade{'s' if _nla_n != 1 else ''}!")
+            else:
+                st.write(
+                    f"- 🛡️ **Never Lost Above {_nla_thresh:.0f}% Conf** "
+                    f"*({_nla_n} win{'s' if _nla_n != 1 else ''}, 0 losses above that level)*"
+                )
 
     with col_stats2:
         st.markdown("**Direction & Conviction:**")
@@ -1452,6 +1463,21 @@ with tab2:
                 avg_conf_win = float(avg_conf_win) if pd.notna(avg_conf_win) else 0.0
                 avg_conf_loss = float(avg_conf_loss) if pd.notna(avg_conf_loss) else 0.0
 
+        # "Never lost above X%" — highest confidence at which a loss was ever recorded,
+        # so all trades above that level are wins.
+        never_lost_above = None   # (threshold_pct, n_wins_above) or None
+        if "Confidence" in _stats_trades.columns and _stats_total > 0:
+            _nla_losses = _stats_trades[_stats_trades["Outcome"] == "Loss"]
+            _nla_wins   = _stats_trades[_stats_trades["Outcome"] == "Win"]
+            if _nla_losses.empty and not _nla_wins.empty:
+                # Perfect record — use the minimum winning confidence as the threshold
+                never_lost_above = (float(_nla_wins["Confidence"].min()), len(_nla_wins), True)
+            elif not _nla_losses.empty:
+                _max_loss_conf = float(_nla_losses["Confidence"].max())
+                _wins_above = _nla_wins[_nla_wins["Confidence"] > _max_loss_conf]
+                if len(_wins_above) >= 1:
+                    never_lost_above = (_max_loss_conf, len(_wins_above), False)
+
         # --- Advanced Stats ---
         live_market_and_advanced_stats_fragment(
             overall_wr=overall_wr,
@@ -1461,6 +1487,7 @@ with tab2:
             down_wr=down_wr,
             avg_conf_win=avg_conf_win,
             avg_conf_loss=avg_conf_loss,
+            never_lost_above=never_lost_above,
         )
 
         # --- Per-Model Breakdown ---
