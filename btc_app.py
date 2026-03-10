@@ -675,135 +675,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 with tab1:
-    # ── Live Market Context ───────────────────────────────────────────────────
-    st.markdown("#### ⚡ Live Market Context")
-    _t1_lc_col, _t1_odds_col = st.columns([1, 1.5])
-
-    with _t1_lc_col:
-        st.markdown("**Last AI Prediction**")
-        _t1_last_history, _ = load_history_from_sheets()
-        if not _t1_last_history.empty:
-            _t1_last = _t1_last_history.iloc[-1]
-            _t1_dir_icon = "⬆️" if _t1_last.get("Prediction") == "UP" else "⬇️"
-            st.metric("Direction", f"{_t1_dir_icon} {_t1_last.get('Prediction', 'N/A')}")
-            st.metric("AI Confidence", f"{_t1_last.get('Confidence', 'N/A')}%")
-            _t1_target_display = fmt_et(_t1_last.get("Target_Time"), "%H:%M %Z") or str(_t1_last.get("Target_Time", "N/A"))
-            st.metric("Target Window", _t1_target_display)
-            _t1_outcome = _t1_last.get("Outcome", "Pending")
-            _t1_outcome_color = "green" if _t1_outcome == "Win" else "red" if _t1_outcome == "Loss" else "orange"
-            st.markdown(f"**Outcome:** :{_t1_outcome_color}[{_t1_outcome}]")
-            _t1_last_odds = _t1_last.get("Polymarket_Odds")
-            if pd.notna(_t1_last_odds) and float(_t1_last_odds) > 0:
-                st.metric("Odds at Prediction", f"{float(_t1_last_odds)*100:.1f}%",
-                          delta=f"Payout {1/float(_t1_last_odds):.2f}x")
-        else:
-            st.info("No predictions logged yet.")
-
-    with _t1_odds_col:
-        st.markdown("**Live Odds — Current Window**")
-        if st.button("🔄 Refresh Odds", key="t1_refresh_polymarket_odds"):
-            fetch_polymarket_odds.clear()
-            st.rerun()
-        _t1_current_window = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
-
-        with st.expander("🔍 Odds fetch diagnostics", expanded=False):
-            _t1_diag_ts = int(_t1_current_window.replace(tzinfo=timezone.utc).timestamp()) - 300
-            _t1_diag_slug = f"btc-updown-5m-{_t1_diag_ts}"
-            _t1_diag_url = f"https://gamma-api.polymarket.com/events?slug={_t1_diag_slug}"
-            st.write(f"**Window target (UTC):** `{_t1_current_window}`")
-            st.write(f"**Slug tried:** `{_t1_diag_slug}`")
-            st.write(f"**API URL:** `{_t1_diag_url}`")
-            try:
-                import requests as _req
-                _t1_raw = _req.get(_t1_diag_url, timeout=5).json()
-                st.json(_t1_raw)
-            except Exception as _t1_e:
-                st.error(f"Request failed: {_t1_e}")
-
-        _t1_live_odds = fetch_polymarket_odds(_t1_current_window)
-
-        if _t1_live_odds:
-            _t1_odds_col_up, _t1_odds_col_down = st.columns(2)
-            _t1_odds_col_up.metric(
-                "UP probability",
-                f"{_t1_live_odds['up'] * 100:.1f}%",
-                delta=f"Implied payout {1 / _t1_live_odds['up']:.2f}x",
-            )
-            _t1_odds_col_down.metric(
-                "DOWN probability",
-                f"{_t1_live_odds['down'] * 100:.1f}%",
-                delta=f"Implied payout {1 / _t1_live_odds['down']:.2f}x",
-            )
-            _t1_src_label = "🟢 CLOB (real-time)" if _t1_live_odds.get("source") == "clob" else "🟡 Gamma (cached)"
-            st.caption(
-                f"Market: `{_t1_live_odds['slug']}` · Source: {_t1_src_label} · Window closes at "
-                f"{fmt_et(_t1_current_window, '%H:%M %Z')} · Auto-refreshes every 10s"
-            )
-        else:
-            st.warning(
-                "Could not fetch live odds from Polymarket. "
-                "The market for this window may not be open yet, or the API is temporarily unavailable."
-            )
-
-        _t1_pm_url = get_polymarket_url()
-        if _t1_pm_url and not _t1_pm_url.startswith("https://polymarket.com/event/PLACEHOLDER"):
-            st.link_button("Open on Polymarket ↗", _t1_pm_url)
-
-        # Accumulate odds readings for trend chart
-        if "pm_odds_history" not in st.session_state:
-            st.session_state.pm_odds_history = []
-        if "pm_odds_window" not in st.session_state:
-            st.session_state.pm_odds_window = None
-        if st.session_state.pm_odds_window != _t1_current_window:
-            st.session_state.pm_odds_history = []
-            st.session_state.pm_odds_window = _t1_current_window
-        if _t1_live_odds:
-            st.session_state.pm_odds_history.append({
-                "ts": datetime.utcnow(),
-                "up": _t1_live_odds["up"] * 100,
-                "down": _t1_live_odds["down"] * 100,
-            })
-
-        if len(st.session_state.pm_odds_history) >= 2:
-            import plotly.graph_objects as go
-            _t1_hist = st.session_state.pm_odds_history
-            _t1_times = [h["ts"] for h in _t1_hist]
-            _t1_ups = [h["up"] for h in _t1_hist]
-            _t1_downs = [h["down"] for h in _t1_hist]
-            _t1_fig = go.Figure()
-            _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_ups, mode="lines+markers",
-                                         name="UP %", line=dict(color="lime", width=2)))
-            _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_downs, mode="lines+markers",
-                                         name="DOWN %", line=dict(color="tomato", width=2)))
-            _t1_fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
-            _t1_chart_title = ""
-            if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
-                _t1_chart_title = f"Strike price: ${_t1_live_odds['price_to_beat']:,.2f}"
-            _t1_fig.update_layout(
-                title=_t1_chart_title,
-                yaxis=dict(title="Probability %", range=[0, 100]),
-                xaxis_title="Time (UTC)",
-                height=300,
-                margin=dict(l=0, r=0, t=40, b=0),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="white"),
-                legend=dict(orientation="h"),
-            )
-            st.plotly_chart(_t1_fig, use_container_width=True)
-        elif _t1_live_odds:
-            st.caption("Collecting readings… chart appears after the second tick (~10s).")
-        else:
-            st.caption("No odds data available for chart.")
-
-        if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
-            st.metric(
-                "🎯 Polymarket Strike Price",
-                f"${_t1_live_odds['price_to_beat']:,.2f}",
-                help="BTC price to beat — parsed from the Polymarket market question for this window.",
-            )
-
-    st.divider()
     st.markdown("### Generate Next Move")
 
     # Session state for prediction tracking
@@ -1014,6 +885,135 @@ with tab1:
                     if pm_odds:
                         st.session_state.last_pred_odds_up = pm_odds["up"]
 
+    st.divider()
+    # ── Live Market Context ───────────────────────────────────────────────────
+    st.markdown("#### ⚡ Live Market Context")
+    _t1_lc_col, _t1_odds_col = st.columns([1, 1.5])
+
+    with _t1_lc_col:
+        st.markdown("**Last AI Prediction**")
+        _t1_last_history, _ = load_history_from_sheets()
+        if not _t1_last_history.empty:
+            _t1_last = _t1_last_history.iloc[-1]
+            _t1_dir_icon = "⬆️" if _t1_last.get("Prediction") == "UP" else "⬇️"
+            st.metric("Direction", f"{_t1_dir_icon} {_t1_last.get('Prediction', 'N/A')}")
+            st.metric("AI Confidence", f"{_t1_last.get('Confidence', 'N/A')}%")
+            _t1_target_display = fmt_et(_t1_last.get("Target_Time"), "%H:%M %Z") or str(_t1_last.get("Target_Time", "N/A"))
+            st.metric("Target Window", _t1_target_display)
+            _t1_outcome = _t1_last.get("Outcome", "Pending")
+            _t1_outcome_color = "green" if _t1_outcome == "Win" else "red" if _t1_outcome == "Loss" else "orange"
+            st.markdown(f"**Outcome:** :{_t1_outcome_color}[{_t1_outcome}]")
+            _t1_last_odds = _t1_last.get("Polymarket_Odds")
+            if pd.notna(_t1_last_odds) and float(_t1_last_odds) > 0:
+                st.metric("Odds at Prediction", f"{float(_t1_last_odds)*100:.1f}%",
+                          delta=f"Payout {1/float(_t1_last_odds):.2f}x")
+        else:
+            st.info("No predictions logged yet.")
+
+    with _t1_odds_col:
+        st.markdown("**Live Odds — Current Window**")
+        if st.button("🔄 Refresh Odds", key="t1_refresh_polymarket_odds"):
+            fetch_polymarket_odds.clear()
+            st.rerun()
+        _t1_current_window = snap_to_polymarket_window(datetime.utcnow().replace(microsecond=0))
+
+        with st.expander("🔍 Odds fetch diagnostics", expanded=False):
+            _t1_diag_ts = int(_t1_current_window.replace(tzinfo=timezone.utc).timestamp()) - 300
+            _t1_diag_slug = f"btc-updown-5m-{_t1_diag_ts}"
+            _t1_diag_url = f"https://gamma-api.polymarket.com/events?slug={_t1_diag_slug}"
+            st.write(f"**Window target (UTC):** `{_t1_current_window}`")
+            st.write(f"**Slug tried:** `{_t1_diag_slug}`")
+            st.write(f"**API URL:** `{_t1_diag_url}`")
+            try:
+                import requests as _req
+                _t1_raw = _req.get(_t1_diag_url, timeout=5).json()
+                st.json(_t1_raw)
+            except Exception as _t1_e:
+                st.error(f"Request failed: {_t1_e}")
+
+        _t1_live_odds = fetch_polymarket_odds(_t1_current_window)
+
+        if _t1_live_odds:
+            _t1_odds_col_up, _t1_odds_col_down = st.columns(2)
+            _t1_odds_col_up.metric(
+                "UP probability",
+                f"{_t1_live_odds['up'] * 100:.1f}%",
+                delta=f"Implied payout {1 / _t1_live_odds['up']:.2f}x",
+            )
+            _t1_odds_col_down.metric(
+                "DOWN probability",
+                f"{_t1_live_odds['down'] * 100:.1f}%",
+                delta=f"Implied payout {1 / _t1_live_odds['down']:.2f}x",
+            )
+            _t1_src_label = "🟢 CLOB (real-time)" if _t1_live_odds.get("source") == "clob" else "🟡 Gamma (cached)"
+            st.caption(
+                f"Market: `{_t1_live_odds['slug']}` · Source: {_t1_src_label} · Window closes at "
+                f"{fmt_et(_t1_current_window, '%H:%M %Z')} · Auto-refreshes every 10s"
+            )
+        else:
+            st.warning(
+                "Could not fetch live odds from Polymarket. "
+                "The market for this window may not be open yet, or the API is temporarily unavailable."
+            )
+
+        _t1_pm_url = get_polymarket_url()
+        if _t1_pm_url and not _t1_pm_url.startswith("https://polymarket.com/event/PLACEHOLDER"):
+            st.link_button("Open on Polymarket ↗", _t1_pm_url)
+
+        # Accumulate odds readings for trend chart
+        if "pm_odds_history" not in st.session_state:
+            st.session_state.pm_odds_history = []
+        if "pm_odds_window" not in st.session_state:
+            st.session_state.pm_odds_window = None
+        if st.session_state.pm_odds_window != _t1_current_window:
+            st.session_state.pm_odds_history = []
+            st.session_state.pm_odds_window = _t1_current_window
+        if _t1_live_odds:
+            st.session_state.pm_odds_history.append({
+                "ts": datetime.utcnow(),
+                "up": _t1_live_odds["up"] * 100,
+                "down": _t1_live_odds["down"] * 100,
+            })
+
+        if len(st.session_state.pm_odds_history) >= 2:
+            import plotly.graph_objects as go
+            _t1_hist = st.session_state.pm_odds_history
+            _t1_times = [h["ts"] for h in _t1_hist]
+            _t1_ups = [h["up"] for h in _t1_hist]
+            _t1_downs = [h["down"] for h in _t1_hist]
+            _t1_fig = go.Figure()
+            _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_ups, mode="lines+markers",
+                                         name="UP %", line=dict(color="lime", width=2)))
+            _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_downs, mode="lines+markers",
+                                         name="DOWN %", line=dict(color="tomato", width=2)))
+            _t1_fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
+            _t1_chart_title = ""
+            if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
+                _t1_chart_title = f"Strike price: ${_t1_live_odds['price_to_beat']:,.2f}"
+            _t1_fig.update_layout(
+                title=_t1_chart_title,
+                yaxis=dict(title="Probability %", range=[0, 100]),
+                xaxis_title="Time (UTC)",
+                height=300,
+                margin=dict(l=0, r=0, t=40, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="white"),
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(_t1_fig, use_container_width=True)
+        elif _t1_live_odds:
+            st.caption("Collecting readings… chart appears after the second tick (~10s).")
+        else:
+            st.caption("No odds data available for chart.")
+
+        if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
+            st.metric(
+                "🎯 Polymarket Strike Price",
+                f"${_t1_live_odds['price_to_beat']:,.2f}",
+                help="BTC price to beat — parsed from the Polymarket market question for this window.",
+            )
+
 with tab2:
     st.markdown("### Model Performance Analytics")
 
@@ -1172,13 +1172,18 @@ with tab2:
         st.divider()
 
         # --- Stats panel filters (independent of the global model filter above) ---
-        _scol1, _scol2 = st.columns(2)
+        _scol1, _scol2, _scol3 = st.columns(3)
         _stats_time = _scol1.radio(
             "Stats window", ["All Time", "Past 12h", "Past 1h"],
             horizontal=True, key="stats_time_filter",
         )
         _stats_model = _scol2.selectbox(
             "Stats model", options=_available_models, key="stats_model_filter",
+        )
+        _stats_odds_bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _stats_odds_bucket = _scol3.selectbox(
+            "Odds bucket", options=_stats_odds_bucket_opts, key="stats_odds_bucket_filter",
+            help="Filter stats to trades where Polymarket odds fell in this range. '>50%' excludes contrarian bets.",
         )
 
         # Build filtered slice for the stats display
@@ -1191,6 +1196,17 @@ with tab2:
             _stats_trades = _stats_trades[_stats_trades["Prediction_Time"] >= _stats_cutoff]
         if _stats_model != "All" and "Model" in _stats_trades.columns:
             _stats_trades = _stats_trades[_stats_trades["Model"] == _stats_model]
+        if _stats_odds_bucket != "All" and "Polymarket_Odds" in _stats_trades.columns:
+            _stats_bucket_map = {
+                ">50%": (0.50, 1.01),
+                "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
+                "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
+            }
+            _sb_lo, _sb_hi = _stats_bucket_map[_stats_odds_bucket]
+            _stats_trades = _stats_trades[
+                (_stats_trades["Polymarket_Odds"] >= _sb_lo) &
+                (_stats_trades["Polymarket_Odds"] < _sb_hi)
+            ]
         _stats_total = len(_stats_trades)
 
         # --- Precompute stats once (fragment uses these values while only the price updates) ---
@@ -1372,13 +1388,13 @@ with tab3:
             help="Restrict the simulation to trades within this lookback window.",
         )
     with _pl_row1b:
-        _pl_bucket_opts = ["All", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+        _pl_bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
         _pl_odds_bucket = st.selectbox(
             "Odds bucket",
             options=_pl_bucket_opts,
             index=_pl_bucket_opts.index(st.session_state.get("pl_odds_bucket", "All")),
             key="pl_odds_bucket",
-            help="Only include trades where Polymarket odds fell in this range.",
+            help="Only include trades where Polymarket odds fell in this range. '>50%' filters out contrarian bets (market disagrees with model).",
         )
     with _pl_row1c:
         _pl_dir_opts = ["All", "UP", "DOWN"]
@@ -1446,6 +1462,7 @@ with tab3:
         if _pl_dir_filter != "All" and "Prediction" in completed_with_odds.columns:
             completed_with_odds = completed_with_odds[completed_with_odds["Prediction"] == _pl_dir_filter]
         _pl_bucket_map = {
+            ">50%": (0.50, 1.01),
             "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
             "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
         }
@@ -1476,6 +1493,7 @@ with tab3:
                 _opt_tw_map = {"All Time": None, "Past 24h": 24, "Past 12h": 12, "Past 1h": 1}
                 _opt_bkt_map = {
                     "All": None,
+                    ">50%": (0.50, 1.01),
                     "50–60%": (0.50, 0.60), "60–70%": (0.60, 0.70),
                     "70–80%": (0.70, 0.80), "80–90%": (0.80, 0.90), "90%+": (0.90, 1.01),
                 }
@@ -1781,7 +1799,7 @@ with tab4:
         else:
             # ── Filters ──────────────────────────────────────────────────────
             fc1, fc2, fc3, fc4 = st.columns(4)
-            _bucket_opts = ["All", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+            _bucket_opts = ["All", ">50%", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
             _odds_bucket = fc1.selectbox("Odds bucket", _bucket_opts, key="t5_bucket")
             _dir_filter = fc2.selectbox("Direction", ["All", "UP", "DOWN"], key="t5_dir")
             _conf_min = fc3.number_input("Min Confidence (%)", 0, 100, 0, step=5, key="t5_conf")
@@ -1793,6 +1811,7 @@ with tab4:
             _odds_model = fc4.selectbox("Model", _t5_models, key="t5_model")
 
             _bucket_ranges = {
+                ">50%": (50, 101),
                 "50–60%": (50, 60), "60–70%": (60, 70),
                 "70–80%": (70, 80), "80–90%": (80, 90), "90%+": (90, 101),
             }
