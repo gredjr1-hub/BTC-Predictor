@@ -8,5 +8,4 @@ plotly
 streamlit-autorefresh
 gspread
 google-auth
-math
-os
+
