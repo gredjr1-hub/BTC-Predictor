@@ -667,11 +667,12 @@ def live_market_and_advanced_stats_fragment(
 # --- 7. UI Layout (Tabs) ---
 # Reset per-cycle warning flag so the 429 warning shows once per render cycle, not 4×
 st.session_state.pop("_429_warned", None)
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔮 Live Predictor",
     "📊 Analytics & 24h Visualizer",
     "🎯 Polymarket Odds",
     "💰 P&L Simulator",
+    "📈 Odds vs Performance",
 ])
 
 with tab1:
@@ -1059,18 +1060,40 @@ with tab2:
 
         st.divider()
 
+        # --- Stats panel filters (independent of the global model filter above) ---
+        _scol1, _scol2 = st.columns(2)
+        _stats_time = _scol1.radio(
+            "Stats window", ["All Time", "Past 12h", "Past 1h"],
+            horizontal=True, key="stats_time_filter",
+        )
+        _stats_model = _scol2.selectbox(
+            "Stats model", options=_available_models, key="stats_model_filter",
+        )
+
+        # Build filtered slice for the stats display
+        _stats_trades = completed_trades.copy()
+        if _stats_time == "Past 12h":
+            _stats_cutoff = datetime.utcnow() - timedelta(hours=12)
+            _stats_trades = _stats_trades[_stats_trades["Prediction_Time"] >= _stats_cutoff]
+        elif _stats_time == "Past 1h":
+            _stats_cutoff = datetime.utcnow() - timedelta(hours=1)
+            _stats_trades = _stats_trades[_stats_trades["Prediction_Time"] >= _stats_cutoff]
+        if _stats_model != "All" and "Model" in _stats_trades.columns:
+            _stats_trades = _stats_trades[_stats_trades["Model"] == _stats_model]
+        _stats_total = len(_stats_trades)
+
         # --- Precompute stats once (fragment uses these values while only the price updates) ---
         pending_trades = history[history["Outcome"] == "Pending"]
 
-        wins = len(completed_trades[completed_trades["Outcome"] == "Win"])
-        overall_wr = (wins / total_completed * 100) if total_completed > 0 else 0.0
+        wins = len(_stats_trades[_stats_trades["Outcome"] == "Win"])
+        overall_wr = (wins / _stats_total * 100) if _stats_total > 0 else 0.0
 
         p90_threshold = None
         p90_wr = None
-        if total_completed > 0 and "Confidence" in completed_trades.columns:
+        if _stats_total > 0 and "Confidence" in _stats_trades.columns:
             try:
-                p90_threshold = float(completed_trades["Confidence"].quantile(0.90))
-                p90_trades = completed_trades[completed_trades["Confidence"] >= p90_threshold]
+                p90_threshold = float(_stats_trades["Confidence"].quantile(0.90))
+                p90_trades = _stats_trades[_stats_trades["Confidence"] >= p90_threshold]
                 if len(p90_trades) > 0:
                     p90_wins = len(p90_trades[p90_trades["Outcome"] == "Win"])
                     p90_wr = (p90_wins / len(p90_trades) * 100)
@@ -1081,9 +1104,9 @@ with tab2:
         down_wr = None
         avg_conf_win = None
         avg_conf_loss = None
-        if total_completed > 0:
-            up_trades = completed_trades[completed_trades["Prediction"] == "UP"]
-            down_trades = completed_trades[completed_trades["Prediction"] == "DOWN"]
+        if _stats_total > 0:
+            up_trades = _stats_trades[_stats_trades["Prediction"] == "UP"]
+            down_trades = _stats_trades[_stats_trades["Prediction"] == "DOWN"]
 
             up_wr = (
                 (len(up_trades[up_trades["Outcome"] == "Win"]) / len(up_trades) * 100) if len(up_trades) > 0 else 0.0
@@ -1094,9 +1117,9 @@ with tab2:
                 else 0.0
             )
 
-            if "Confidence" in completed_trades.columns:
-                avg_conf_win = completed_trades[completed_trades["Outcome"] == "Win"]["Confidence"].mean()
-                avg_conf_loss = completed_trades[completed_trades["Outcome"] == "Loss"]["Confidence"].mean()
+            if "Confidence" in _stats_trades.columns:
+                avg_conf_win = _stats_trades[_stats_trades["Outcome"] == "Win"]["Confidence"].mean()
+                avg_conf_loss = _stats_trades[_stats_trades["Outcome"] == "Loss"]["Confidence"].mean()
                 avg_conf_win = float(avg_conf_win) if pd.notna(avg_conf_win) else 0.0
                 avg_conf_loss = float(avg_conf_loss) if pd.notna(avg_conf_loss) else 0.0
 
@@ -1124,12 +1147,18 @@ with tab2:
                 _m_wins = len(_m_trades[_m_trades["Outcome"] == "Win"])
                 _m_wr = _m_wins / _m_total * 100
                 _m_avg_conf = _m_trades["Confidence"].mean() if "Confidence" in _m_trades.columns else None
+                _m_avg_odds = (
+                    _m_trades["Polymarket_Odds"].mean() * 100
+                    if "Polymarket_Odds" in _m_trades.columns and _m_trades["Polymarket_Odds"].notna().any()
+                    else None
+                )
                 _model_rows.append({
                     "Model": _m,
                     "Trades": _m_total,
                     "Wins": _m_wins,
                     "Win Rate": f"{_m_wr:.1f}%",
                     "Avg Confidence": f"{_m_avg_conf:.1f}%" if _m_avg_conf else "—",
+                    "Avg Odds": f"{_m_avg_odds:.1f}%" if _m_avg_odds is not None else "—",
                 })
             if _model_rows:
                 st.dataframe(pd.DataFrame(_model_rows), hide_index=True, use_container_width=True)
@@ -1572,3 +1601,206 @@ with tab4:
                     f"Note: {excluded_count} completed prediction(s) excluded from simulation "
                     "— Polymarket odds were not recorded at prediction time (pre-dates this feature)."
                 )
+
+# ── Tab 5: Odds vs Performance ────────────────────────────────────────────────
+with tab5:
+    st.markdown("## 📈 Odds vs Performance")
+
+    # Load history (may already be loaded; reuse the same cache-backed function)
+    _t5_history, _ = load_history_from_sheets()
+
+    if _t5_history.empty or "Polymarket_Odds" not in _t5_history.columns:
+        st.info("No data with Polymarket odds yet.")
+    else:
+        _odds_df = _t5_history[
+            _t5_history["Outcome"].isin(["Win", "Loss"]) &
+            _t5_history["Polymarket_Odds"].notna() &
+            (_t5_history["Polymarket_Odds"] > 0)
+        ].copy()
+        _odds_df["Odds_Pct"] = _odds_df["Polymarket_Odds"] * 100
+
+        if _odds_df.empty:
+            st.info("No completed trades with Polymarket odds recorded yet.")
+        else:
+            # ── Filters ──────────────────────────────────────────────────────
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            _bucket_opts = ["All", "50–60%", "60–70%", "70–80%", "80–90%", "90%+"]
+            _odds_bucket = fc1.selectbox("Odds bucket", _bucket_opts, key="t5_bucket")
+            _dir_filter = fc2.selectbox("Direction", ["All", "UP", "DOWN"], key="t5_dir")
+            _conf_min = fc3.number_input("Min Confidence (%)", 0, 100, 0, step=5, key="t5_conf")
+            _t5_models = (
+                ["All"] + sorted(_odds_df["Model"].dropna().unique().tolist())
+                if "Model" in _odds_df.columns
+                else ["All"]
+            )
+            _odds_model = fc4.selectbox("Model", _t5_models, key="t5_model")
+
+            _bucket_ranges = {
+                "50–60%": (50, 60), "60–70%": (60, 70),
+                "70–80%": (70, 80), "80–90%": (80, 90), "90%+": (90, 101),
+            }
+
+            # Apply filters to the scatter dataset
+            _fdf = _odds_df.copy()
+            if _odds_bucket != "All":
+                _blo, _bhi = _bucket_ranges[_odds_bucket]
+                _fdf = _fdf[(_fdf["Odds_Pct"] >= _blo) & (_fdf["Odds_Pct"] < _bhi)]
+            if _dir_filter != "All":
+                _fdf = _fdf[_fdf["Prediction"] == _dir_filter]
+            if _conf_min > 0 and "Confidence" in _fdf.columns:
+                _fdf = _fdf[_fdf["Confidence"] >= _conf_min]
+            if _odds_model != "All" and "Model" in _fdf.columns:
+                _fdf = _fdf[_fdf["Model"] == _odds_model]
+
+            if _fdf.empty:
+                st.warning("No trades match the selected filters.")
+            else:
+                # ── Scatterplot: Odds vs Confidence, coloured by outcome ────
+                import plotly.graph_objects as _go
+                _wins_s = _fdf[_fdf["Outcome"] == "Win"]
+                _loss_s = _fdf[_fdf["Outcome"] == "Loss"]
+
+                _fig5 = _go.Figure()
+                _fig5.add_trace(_go.Scatter(
+                    x=_wins_s["Odds_Pct"],
+                    y=_wins_s["Confidence"],
+                    mode="markers",
+                    marker=dict(color="rgba(0,200,100,0.65)", size=8),
+                    name="Win",
+                    hovertemplate="Odds: %{x:.1f}%<br>Conf: %{y:.1f}%<br>Win<extra></extra>",
+                ))
+                _fig5.add_trace(_go.Scatter(
+                    x=_loss_s["Odds_Pct"],
+                    y=_loss_s["Confidence"],
+                    mode="markers",
+                    marker=dict(color="rgba(220,50,50,0.65)", size=8),
+                    name="Loss",
+                    hovertemplate="Odds: %{x:.1f}%<br>Conf: %{y:.1f}%<br>Loss<extra></extra>",
+                ))
+                _fig5.update_layout(
+                    title="Polymarket Odds vs Model Confidence (coloured by outcome)",
+                    xaxis_title="Polymarket Odds (%)",
+                    yaxis_title="Model Confidence (%)",
+                    height=420,
+                    legend=dict(orientation="h", y=1.08),
+                )
+                st.plotly_chart(_fig5, use_container_width=True)
+
+                # ── Stats table by odds bucket (always uses full _odds_df, not filtered) ──
+                st.markdown("#### Win Rate by Odds Bucket")
+                _bucket_rows = []
+                for _blabel, (_blo, _bhi) in _bucket_ranges.items():
+                    _bdf = _odds_df[(_odds_df["Odds_Pct"] >= _blo) & (_odds_df["Odds_Pct"] < _bhi)]
+                    if len(_bdf) == 0:
+                        continue
+                    _bwins = len(_bdf[_bdf["Outcome"] == "Win"])
+                    _bwr = _bwins / len(_bdf) * 100
+                    _bavg_conf = _bdf["Confidence"].mean() if "Confidence" in _bdf.columns else None
+                    _bucket_rows.append({
+                        "Odds Range": _blabel,
+                        "Trades": len(_bdf),
+                        "Wins": _bwins,
+                        "Win Rate": f"{_bwr:.1f}%",
+                        "Avg Confidence": f"{_bavg_conf:.1f}%" if _bavg_conf is not None else "—",
+                    })
+                if _bucket_rows:
+                    st.dataframe(pd.DataFrame(_bucket_rows), hide_index=True, use_container_width=True)
+
+            # ── Trends & Patterns blurb (always uses full _odds_df for signal strength) ──
+            st.markdown("#### 🔍 Trend & Pattern Analysis")
+            _insights = []
+
+            # Time of day
+            if "Prediction_Time" in _odds_df.columns and len(_odds_df) >= 10:
+                _tdf = _odds_df.copy()
+                _tdf["_hour"] = _tdf["Prediction_Time"].dt.hour
+                _hourly = (
+                    _tdf.groupby("_hour")
+                    .apply(lambda x: pd.Series({
+                        "trades": len(x),
+                        "win_rate": (x["Outcome"] == "Win").mean() * 100,
+                    }))
+                    .reset_index()
+                )
+                _hourly = _hourly[_hourly["trades"] >= 3]
+                if not _hourly.empty:
+                    _bh = _hourly.loc[_hourly["win_rate"].idxmax()]
+                    _wh = _hourly.loc[_hourly["win_rate"].idxmin()]
+                    _bh_et = int((_bh["_hour"] - 5) % 24)
+                    _wh_et = int((_wh["_hour"] - 5) % 24)
+                    _insights.append(
+                        f"**⏰ Time of Day:** Best hour is **{int(_bh['_hour'])}:00 UTC "
+                        f"({_bh_et}:00 ET)** with a {_bh['win_rate']:.0f}% win rate "
+                        f"({int(_bh['trades'])} trades). "
+                        f"Weakest hour is {int(_wh['_hour'])}:00 UTC ({_wh_et}:00 ET) "
+                        f"at {_wh['win_rate']:.0f}% ({int(_wh['trades'])} trades). "
+                        f"Consider prioritising trades during your peak UTC window."
+                    )
+
+            # Confidence tier analysis
+            if "Confidence" in _odds_df.columns and len(_odds_df) >= 10:
+                _ctier_defs = [(50, 60), (60, 70), (70, 80), (80, 101)]
+                _ctier_rows = []
+                for _clo, _chi in _ctier_defs:
+                    _ctdf = _odds_df[(_odds_df["Confidence"] >= _clo) & (_odds_df["Confidence"] < _chi)]
+                    if len(_ctdf) >= 3:
+                        _ctier_rows.append(
+                            (_clo, min(_chi, 100), len(_ctdf), (_ctdf["Outcome"] == "Win").mean() * 100)
+                        )
+                if _ctier_rows:
+                    _best_ct = max(_ctier_rows, key=lambda x: x[3])
+                    _note = (
+                        " Higher confidence does not always equal higher win rate — check if the 80%+ tier underperforms."
+                        if len(_ctier_rows) > 1 and _best_ct[1] < 80
+                        else ""
+                    )
+                    _insights.append(
+                        f"**🎯 Confidence Tiers:** The **{_best_ct[0]}–{_best_ct[1]}% confidence band** "
+                        f"achieves the highest win rate at **{_best_ct[3]:.0f}%** "
+                        f"({_best_ct[2]} trades).{_note}"
+                    )
+
+            # Direction at high odds
+            if "Prediction" in _odds_df.columns and len(_odds_df) >= 10:
+                _high_odds = _odds_df[_odds_df["Odds_Pct"] >= 70]
+                if len(_high_odds) >= 5:
+                    _up_ho = _high_odds[_high_odds["Prediction"] == "UP"]
+                    _dn_ho = _high_odds[_high_odds["Prediction"] == "DOWN"]
+                    _up_wr_ho = ((_up_ho["Outcome"] == "Win").mean() * 100) if len(_up_ho) >= 3 else None
+                    _dn_wr_ho = ((_dn_ho["Outcome"] == "Win").mean() * 100) if len(_dn_ho) >= 3 else None
+                    if _up_wr_ho is not None and _dn_wr_ho is not None:
+                        _better_dir = "UP (Long)" if _up_wr_ho >= _dn_wr_ho else "DOWN (Short)"
+                        _insights.append(
+                            f"**📐 Direction at High Odds (≥70%):** When the market strongly favours one side, "
+                            f"**{_better_dir}** predictions perform better "
+                            f"(UP: {_up_wr_ho:.0f}%, DOWN: {_dn_wr_ho:.0f}%). "
+                            f"Consider weighting bets toward {_better_dir} calls when odds are elevated."
+                        )
+
+            # Model vs market agreement
+            if "PM_Resolution" in _odds_df.columns and "Prediction" in _odds_df.columns:
+                _agree_df = _odds_df[_odds_df["PM_Resolution"].isin(["UP", "DOWN"])].copy()
+                _agree_df["_agrees"] = _agree_df["Prediction"] == _agree_df["PM_Resolution"]
+                _agree = _agree_df[_agree_df["_agrees"]]
+                _disagree = _agree_df[~_agree_df["_agrees"]]
+                if len(_agree) >= 5 and len(_disagree) >= 5:
+                    _awr = (_agree["Outcome"] == "Win").mean() * 100
+                    _dwr = (_disagree["Outcome"] == "Win").mean() * 100
+                    _signal = (
+                        "Strong signal — model agreement with market direction is predictive."
+                        if abs(_awr - _dwr) > 10
+                        else "Low divergence — model and market are well-aligned overall."
+                    )
+                    _insights.append(
+                        f"**🤝 Model vs Market Agreement:** When your model agrees with the Polymarket outcome, "
+                        f"win rate is **{_awr:.0f}%** ({len(_agree)} trades). "
+                        f"When it disagrees, win rate is {_dwr:.0f}% ({len(_disagree)} trades). "
+                        f"{_signal}"
+                    )
+
+            if _insights:
+                for _ins in _insights:
+                    st.markdown(_ins)
+                    st.markdown("")
+            else:
+                st.info("Not enough data yet to surface meaningful trends (need ≥10 completed trades with Polymarket odds).")
