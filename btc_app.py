@@ -435,9 +435,9 @@ def get_autotrader_sheet():
             ws = ws_main.worksheet("AutoTrader")
         except gspread.WorksheetNotFound:
             ws = ws_main.add_worksheet("AutoTrader", rows=1000, cols=10)
-            ws.append_row(["Trade_Time", "Direction", "Confidence", "Entry_Price",
-                           "Trade_Amount", "Portfolio_Before", "Portfolio_After",
-                           "Outcome", "Close_Price", "PnL"])
+            ws.append_row(["Trade_Time", "Direction", "Confidence", "Price",
+                           "BTC_Change", "Cash_Change", "BTC_Balance", "Cash_Balance",
+                           "Portfolio_Value", "Model_Used"])
         return ws
     except Exception:
         return None
@@ -682,12 +682,14 @@ def _load_training_stats():
 st.session_state.pop("_429_warned", None)
 if "at_enabled" not in st.session_state:
     st.session_state.at_enabled = False
-if "at_portfolio" not in st.session_state:
-    st.session_state.at_portfolio = 1000.0
-if "at_last_trade_time" not in st.session_state:
-    st.session_state.at_last_trade_time = None
+if "at_btc" not in st.session_state:
+    st.session_state.at_btc = None        # BTC held (qty), seeded on first price fetch
+if "at_cash" not in st.session_state:
+    st.session_state.at_cash = 500.0      # USD cash
+if "at_btc_seeded" not in st.session_state:
+    st.session_state.at_btc_seeded = False
 if "at_open_position" not in st.session_state:
-    st.session_state.at_open_position = None  # {"direction", "entry", "amount", "trade_time", "target_time"}
+    st.session_state.at_open_position = None  # {"direction", "entry", "trade_time", "target_time"}
 if "at_trade_log" not in st.session_state:
     st.session_state.at_trade_log = []
 
@@ -2907,38 +2909,18 @@ with tab6:
             value=10, step=5, key="at_max_pct"
         )
 
-    # ── Seed portfolio from sheet on first load ───────────────────────────────
-    if st.session_state.at_portfolio == 1000.0 and st.session_state.at_trade_log == []:
+    # ── Restore BTC/Cash balances from last sheet row on first load ──────────
+    if not st.session_state.at_btc_seeded and st.session_state.at_trade_log == []:
         try:
             _at_ws = get_autotrader_sheet()
             if _at_ws is not None:
                 _at_rows = _at_ws.get_all_values()
                 if len(_at_rows) > 1:
-                    _at_headers = _at_rows[0]
-                    _at_portfolio_val = 1000.0
-                    _at_loaded_log = []
-                    for _at_row in _at_rows[1:]:
-                        _at_rec = dict(zip(_at_headers, _at_row + [""] * max(0, len(_at_headers) - len(_at_row))))
-                        if _at_rec.get("Outcome") in ("Win", "Loss"):
-                            try:
-                                _at_loaded_log.append({
-                                    "Trade_Time": _at_rec.get("Trade_Time", ""),
-                                    "Direction": _at_rec.get("Direction", ""),
-                                    "Confidence": float(_at_rec.get("Confidence", 0)),
-                                    "Entry_Price": float(_at_rec.get("Entry_Price", 0)),
-                                    "Trade_Amount": float(_at_rec.get("Trade_Amount", 0)),
-                                    "Portfolio_Before": float(_at_rec.get("Portfolio_Before", 0)),
-                                    "Portfolio_After": float(_at_rec.get("Portfolio_After", 0)),
-                                    "Outcome": _at_rec.get("Outcome", ""),
-                                    "Close_Price": _at_rec.get("Close_Price", ""),
-                                    "PnL": float(_at_rec.get("PnL", 0)),
-                                })
-                                _at_portfolio_val = float(_at_rec.get("Portfolio_After", _at_portfolio_val))
-                            except (ValueError, TypeError):
-                                pass
-                    if _at_loaded_log:
-                        st.session_state.at_trade_log = _at_loaded_log
-                        st.session_state.at_portfolio = _at_portfolio_val
+                    _at_last = dict(zip(_at_rows[0], _at_rows[-1]))
+                    st.session_state.at_btc = float(_at_last.get("BTC_Balance", 0)) or None
+                    st.session_state.at_cash = float(_at_last.get("Cash_Balance", 500.0))
+                    if st.session_state.at_btc:
+                        st.session_state.at_btc_seeded = True
         except Exception:
             pass
 
@@ -2949,197 +2931,163 @@ with tab6:
 
         _at_now = datetime.utcnow()
 
-        # Grade open position if target time has passed
+        # Release hold if target time has passed (no grading needed)
         if st.session_state.at_open_position is not None:
             _at_pos = st.session_state.at_open_position
             _at_target_dt = _at_pos["target_time"]
             if isinstance(_at_target_dt, str):
                 _at_target_dt = datetime.fromisoformat(_at_target_dt)
             if _at_now >= _at_target_dt:
-                try:
-                    _at_close_data = get_live_prediction_data()
-                    _at_close_price = float(_at_close_data.iloc[-1]["Close"])
-                    _at_live_close = get_live_ticker_price()
-                    if _at_live_close:
-                        _at_close_price = _at_live_close
+                st.session_state.at_open_position = None
 
-                    _at_direction = _at_pos["direction"]
-                    _at_entry = _at_pos["entry"]
-                    _at_amount = _at_pos["amount"]
-                    _at_port_before = _at_pos["portfolio_before"]
+        # Open new trade if no open position
+        if st.session_state.at_open_position is None:
+            try:
+                _at_live = get_live_prediction_data()
+                _at_state = _at_live.iloc[-1:]
+                _at_cur_price = float(_at_state["Close"].values[0])
+                _at_live_price = get_live_ticker_price()
+                _at_entry_price = _at_live_price if _at_live_price else _at_cur_price
+
+                # Seed BTC on first trade if not yet done
+                if not st.session_state.at_btc_seeded:
+                    st.session_state.at_btc = 500.0 / _at_entry_price
+                    st.session_state.at_btc_seeded = True
+
+                _at_price_chg = 0.0
+
+                _AT_FEATURE_COLS = [
+                    'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
+                    'BB_Upper', 'BB_Lower', 'Volume_ROC',
+                    'price_change_since_window_start', 'price_change_abs'
+                ]
+                _at_state = _at_state.copy()
+                _at_state["price_change_since_window_start"] = _at_price_chg
+                _at_state["price_change_abs"] = abs(_at_price_chg)
+                _at_state_pred = _at_state[_AT_FEATURE_COLS]
+
+                _at_horizon_model = model[5]
+                _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
+                _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
+                _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
+                _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
+
+                if _at_conf >= _at_threshold:
+                    _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+                    _at_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
+                    _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
                     if _at_direction == "UP":
-                        _at_win = _at_close_price > _at_entry
-                    else:
-                        _at_win = _at_close_price < _at_entry
+                        _at_cash_used = round(st.session_state.at_cash * _at_pct, 2)
+                        if _at_cash_used < 1.0:
+                            st.caption("No trade: insufficient cash")
+                        else:
+                            _at_btc_bought = _at_cash_used / _at_entry_price
+                            st.session_state.at_cash -= _at_cash_used
+                            st.session_state.at_btc += _at_btc_bought
+                            _at_btc_change = round(_at_btc_bought, 8)   # positive = bought
+                            _at_cash_change = round(-_at_cash_used, 2)  # negative = spent
+                            _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
 
-                    if _at_win:
-                        _at_pnl = _at_amount * 0.9
-                        _at_outcome = "Win"
-                    else:
-                        _at_pnl = -_at_amount
-                        _at_outcome = "Loss"
+                            _at_log_entry = {
+                                "Trade_Time": _at_trade_time_str,
+                                "Direction": _at_direction,
+                                "Confidence": round(_at_conf, 1),
+                                "Price": round(_at_entry_price, 2),
+                                "BTC_Change": _at_btc_change,
+                                "Cash_Change": _at_cash_change,
+                                "BTC_Balance": round(st.session_state.at_btc, 8),
+                                "Cash_Balance": round(st.session_state.at_cash, 2),
+                                "Portfolio_Value": _at_portfolio_value,
+                                "Model_Used": "5min",
+                            }
+                            st.session_state.at_trade_log.insert(0, _at_log_entry)
 
-                    _at_port_after = _at_port_before + _at_pnl
-                    st.session_state.at_portfolio = _at_port_after
+                            try:
+                                _at_ws = get_autotrader_sheet()
+                                if _at_ws is not None:
+                                    _at_ws.append_row([
+                                        _at_trade_time_str, _at_direction,
+                                        round(_at_conf, 1), round(_at_entry_price, 2),
+                                        _at_btc_change, _at_cash_change,
+                                        round(st.session_state.at_btc, 8),
+                                        round(st.session_state.at_cash, 2),
+                                        _at_portfolio_value, "5min",
+                                    ])
+                            except Exception:
+                                pass
 
-                    # Update trade log entry
-                    _at_trade_time_str = _at_pos["trade_time"]
-                    for _at_entry_rec in st.session_state.at_trade_log:
-                        if _at_entry_rec.get("Trade_Time") == _at_trade_time_str and _at_entry_rec.get("Outcome") == "Pending":
-                            _at_entry_rec["Outcome"] = _at_outcome
-                            _at_entry_rec["Close_Price"] = round(_at_close_price, 2)
-                            _at_entry_rec["PnL"] = round(_at_pnl, 2)
-                            _at_entry_rec["Portfolio_After"] = round(_at_port_after, 2)
-                            break
+                            st.session_state.at_open_position = {
+                                "direction": _at_direction,
+                                "entry": _at_entry_price,
+                                "trade_time": _at_trade_time_str,
+                                "target_time": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
+                            }
+                            st.info(f"BUY {_at_btc_change:.6f} BTC @ ${_at_entry_price:,.2f} | Spent: ${abs(_at_cash_change):.2f} | Conf: {_at_conf:.1f}%")
 
-                    # Update sheet row
-                    try:
-                        _at_ws = get_autotrader_sheet()
-                        if _at_ws is not None:
-                            _at_all = _at_ws.get_all_values()
-                            for _at_ri, _at_row in enumerate(_at_all[1:], start=2):
-                                if _at_row and _at_row[0] == _at_trade_time_str:
-                                    _at_ws.update_cell(_at_ri, 7, round(_at_port_after, 2))  # Portfolio_After
-                                    _at_ws.update_cell(_at_ri, 8, _at_outcome)               # Outcome
-                                    _at_ws.update_cell(_at_ri, 9, round(_at_close_price, 2)) # Close_Price
-                                    _at_ws.update_cell(_at_ri, 10, round(_at_pnl, 2))         # PnL
-                                    break
-                    except Exception:
-                        pass
+                    else:  # DOWN
+                        _at_btc_sold = round(st.session_state.at_btc * _at_pct, 8)
+                        if _at_btc_sold * _at_entry_price < 1.0:
+                            st.caption("No trade: insufficient BTC")
+                        else:
+                            _at_cash_received = _at_btc_sold * _at_entry_price
+                            st.session_state.at_btc -= _at_btc_sold
+                            st.session_state.at_cash += _at_cash_received
+                            _at_btc_change = round(-_at_btc_sold, 8)         # negative = sold
+                            _at_cash_change = round(_at_cash_received, 2)    # positive = received
+                            _at_portfolio_value = round(st.session_state.at_cash + st.session_state.at_btc * _at_entry_price, 2)
 
-                    st.session_state.at_open_position = None
-                    st.success(f"Position graded: {_at_outcome} | P&L: ${_at_pnl:+.2f}")
-                except Exception as _at_grade_err:
-                    st.warning(f"Could not grade open position: {_at_grade_err}")
+                            _at_log_entry = {
+                                "Trade_Time": _at_trade_time_str,
+                                "Direction": _at_direction,
+                                "Confidence": round(_at_conf, 1),
+                                "Price": round(_at_entry_price, 2),
+                                "BTC_Change": _at_btc_change,
+                                "Cash_Change": _at_cash_change,
+                                "BTC_Balance": round(st.session_state.at_btc, 8),
+                                "Cash_Balance": round(st.session_state.at_cash, 2),
+                                "Portfolio_Value": _at_portfolio_value,
+                                "Model_Used": "5min",
+                            }
+                            st.session_state.at_trade_log.insert(0, _at_log_entry)
 
-        # Open new trade if no open position and cooldown passed
-        if st.session_state.at_open_position is None:
-            _at_last = st.session_state.at_last_trade_time
-            _at_cooldown_ok = (
-                _at_last is None
-                or (_at_now - _at_last).total_seconds() >= 60
-            )
-            if _at_cooldown_ok:
-                try:
-                    _at_live = get_live_prediction_data()
-                    _at_state = _at_live.iloc[-1:]
-                    _at_cur_price = float(_at_state["Close"].values[0])
-                    _at_live_price = get_live_ticker_price()
-                    _at_entry_price = _at_live_price if _at_live_price else _at_cur_price
+                            try:
+                                _at_ws = get_autotrader_sheet()
+                                if _at_ws is not None:
+                                    _at_ws.append_row([
+                                        _at_trade_time_str, _at_direction,
+                                        round(_at_conf, 1), round(_at_entry_price, 2),
+                                        _at_btc_change, _at_cash_change,
+                                        round(st.session_state.at_btc, 8),
+                                        round(st.session_state.at_cash, 2),
+                                        _at_portfolio_value, "5min",
+                                    ])
+                            except Exception:
+                                pass
 
-                    _at_target = snap_to_polymarket_window(datetime.utcnow())
-                    _at_win_start = _at_target - timedelta(minutes=5)
-                    _at_wsp = fetch_pyth_price_at(_at_win_start)
-                    if _at_wsp is None:
-                        _at_wsp_candles = _at_live[_at_live.index == _at_win_start]
-                        _at_wsp = (
-                            float(_at_wsp_candles["Close"].values[0])
-                            if not _at_wsp_candles.empty
-                            else _at_cur_price
-                        )
+                            st.session_state.at_open_position = {
+                                "direction": _at_direction,
+                                "entry": _at_entry_price,
+                                "trade_time": _at_trade_time_str,
+                                "target_time": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
+                            }
+                            st.info(f"SELL {abs(_at_btc_change):.6f} BTC @ ${_at_entry_price:,.2f} | Received: ${_at_cash_change:.2f} | Conf: {_at_conf:.1f}%")
+                else:
+                    st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}%")
 
-                    _at_price_chg = (
-                        (_at_cur_price - _at_wsp) / _at_wsp
-                        if _at_wsp and _at_wsp != 0
-                        else 0.0
-                    )
-
-                    _AT_FEATURE_COLS = [
-                        'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
-                        'BB_Upper', 'BB_Lower', 'Volume_ROC',
-                        'price_change_since_window_start', 'price_change_abs'
-                    ]
-                    _at_state = _at_state.copy()
-                    _at_state["price_change_since_window_start"] = _at_price_chg
-                    _at_state["price_change_abs"] = abs(_at_price_chg)
-                    _at_state_pred = _at_state[_AT_FEATURE_COLS]
-
-                    _at_horizon_model = model[5]
-                    _at_pred_val = _at_horizon_model.predict(_at_state_pred)[0]
-                    _at_probs = _at_horizon_model.predict_proba(_at_state_pred)[0]
-                    _at_direction = "UP" if _at_pred_val == 1 else "DOWN"
-                    _at_conf = (_at_probs[1] if _at_pred_val == 1 else _at_probs[0]) * 100
-
-                    if _at_conf >= _at_threshold:
-                        _at_factor = (_at_conf / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
-                        _at_trade_amount = st.session_state.at_portfolio * (_at_max_pct / 100.0) * (0.5 + 0.5 * _at_factor)
-                        _at_trade_amount = round(_at_trade_amount, 2)
-                        _at_port_before = round(st.session_state.at_portfolio, 2)
-                        _at_trade_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-                        st.session_state.at_open_position = {
-                            "direction": _at_direction,
-                            "entry": _at_entry_price,
-                            "amount": _at_trade_amount,
-                            "trade_time": _at_trade_time_str,
-                            "target_time": _at_target.isoformat(),
-                            "portfolio_before": _at_port_before,
-                        }
-                        st.session_state.at_last_trade_time = _at_now
-
-                        _at_log_entry = {
-                            "Trade_Time": _at_trade_time_str,
-                            "Direction": _at_direction,
-                            "Confidence": round(_at_conf, 1),
-                            "Entry_Price": round(_at_entry_price, 2),
-                            "Trade_Amount": _at_trade_amount,
-                            "Portfolio_Before": _at_port_before,
-                            "Portfolio_After": "—",
-                            "Outcome": "Pending",
-                            "Close_Price": "—",
-                            "PnL": "—",
-                        }
-                        st.session_state.at_trade_log.insert(0, _at_log_entry)
-
-                        try:
-                            _at_ws = get_autotrader_sheet()
-                            if _at_ws is not None:
-                                _at_ws.append_row([
-                                    _at_trade_time_str,
-                                    _at_direction,
-                                    round(_at_conf, 1),
-                                    round(_at_entry_price, 2),
-                                    _at_trade_amount,
-                                    _at_port_before,
-                                    "",       # Portfolio_After (pending)
-                                    "Pending",
-                                    "",       # Close_Price
-                                    "",       # PnL
-                                ])
-                        except Exception:
-                            pass
-
-                        st.info(f"New trade opened: {_at_direction} @ ${_at_entry_price:,.2f} | Conf: {_at_conf:.1f}% | Size: ${_at_trade_amount:.2f}")
-                    else:
-                        st.caption(f"No trade: confidence {_at_conf:.1f}% below threshold {_at_threshold}%")
-
-                except Exception as _at_trade_err:
-                    st.warning(f"Auto trader error: {_at_trade_err}")
-
-    # ── Open position status ──────────────────────────────────────────────────
-    if st.session_state.at_open_position is not None:
-        _at_pos = st.session_state.at_open_position
-        st.info(
-            f"**Open Position:** {_at_pos['direction']} | "
-            f"Entry: ${float(_at_pos['entry']):,.2f} | "
-            f"Size: ${float(_at_pos['amount']):.2f} | "
-            f"Resolves at: {_at_pos['target_time']}"
-        )
+            except Exception as _at_trade_err:
+                st.warning(f"Auto trader error: {_at_trade_err}")
 
     # ── Portfolio metrics ─────────────────────────────────────────────────────
-    _at_completed = [t for t in st.session_state.at_trade_log if t.get("Outcome") in ("Win", "Loss")]
-    _at_wins = sum(1 for t in _at_completed if t.get("Outcome") == "Win")
-    _at_total = len(_at_completed)
-    _at_win_rate = (_at_wins / _at_total * 100) if _at_total > 0 else 0.0
-    _at_total_pnl = sum(float(t.get("PnL", 0)) for t in _at_completed)
+    _at_current_price = get_live_ticker_price() or (float(get_live_prediction_data().iloc[-1]["Close"]) if True else 0)
+    _at_btc_value = st.session_state.at_btc * _at_current_price if st.session_state.at_btc else 0
+    _at_total = st.session_state.at_cash + _at_btc_value
 
     _at_m1, _at_m2, _at_m3, _at_m4 = st.columns(4)
-    _at_m1.metric("Portfolio Value", f"${st.session_state.at_portfolio:,.2f}",
-                  delta=f"${st.session_state.at_portfolio - 1000.0:+,.2f}")
-    _at_m2.metric("Total P&L", f"${_at_total_pnl:+,.2f}")
-    _at_m3.metric("Win Rate", f"{_at_win_rate:.1f}%")
-    _at_m4.metric("Completed Trades", str(_at_total))
+    _at_m1.metric("Portfolio Value", f"${_at_total:,.2f}", delta=f"${_at_total - 1000.0:+,.2f}")
+    _at_m2.metric("Cash", f"${st.session_state.at_cash:,.2f}")
+    _at_m3.metric("BTC Held", f"{st.session_state.at_btc:.6f} BTC" if st.session_state.at_btc else "—")
+    _at_m4.metric("BTC Value", f"${_at_btc_value:,.2f}")
 
     # ── Trade history ─────────────────────────────────────────────────────────
     if st.session_state.at_trade_log:
