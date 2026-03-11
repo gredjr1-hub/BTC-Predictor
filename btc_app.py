@@ -2915,19 +2915,30 @@ with tab6:
             "Enable Auto Trader", value=st.session_state.at_enabled
         )
     with _at_col2:
-        _at_threshold = st.slider(
-            "Min Confidence (%)", min_value=50, max_value=90,
-            value=60, step=1, key="at_threshold"
+        _at_buy_threshold = st.slider(
+            "Min BUY Confidence (%)", min_value=50, max_value=90,
+            value=60, step=1, key="at_buy_threshold"
         )
     with _at_col3:
+        _at_sell_threshold = st.slider(
+            "Min SELL Confidence (%)", min_value=50, max_value=90,
+            value=60, step=1, key="at_sell_threshold"
+        )
+    with _at_col4:
         _at_max_pct = st.slider(
             "Max % per Trade", min_value=5, max_value=50,
             value=10, step=5, key="at_max_pct"
         )
-    with _at_col4:
+    _at_col5, _at_col6 = st.columns(2)
+    with _at_col5:
         _at_dca_amount = st.number_input(
             "DCA Buy Amount ($)", min_value=1.0, max_value=1000.0,
             value=25.0, step=5.0, key="at_dca_amount"
+        )
+    with _at_col6:
+        _at_wh_min_wait = st.slider(
+            "Whaling: Min wait after BUY (minutes)", min_value=1, max_value=5,
+            value=2, step=1, key="at_wh_min_wait"
         )
 
     # ── Restore balances + trade history from sheet on first load ────────────
@@ -3145,7 +3156,11 @@ with tab6:
 
         # ── Shared data extraction (skip rows with zero/missing price) ────────
         _at_chart_data = [t for t in _at_chart_data if t.get("Price", 0)]
-        _at_chart_data = [t for t in _at_chart_data if t.get("Confidence", 0) >= _at_threshold]
+        _at_chart_data = [
+            t for t in _at_chart_data
+            if (t.get("Direction") == "BUY" and t.get("Confidence", 0) >= _at_buy_threshold)
+            or (t.get("Direction") == "SELL" and t.get("Confidence", 0) >= _at_sell_threshold)
+        ]
         _at_times  = [t["Trade_Time"]      for t in _at_chart_data]
         _at_dirs   = [t["Direction"]       for t in _at_chart_data]
         _at_confs  = [t["Confidence"]      for t in _at_chart_data]
@@ -3160,22 +3175,32 @@ with tab6:
 
         # ── Whaling simulation ────────────────────────────────────────────────
         _at_whale_vals = []
-        _at_whale_marker_dirs = []  # None if trade could not execute
+        _at_whale_marker_dirs = []
         if _at_prices:
             _wh_btc  = 500.0 / _at_prices[0]
             _wh_cash = 500.0
-            for d, p in zip(_at_dirs, _at_prices):
-                if d == "BUY" and _wh_cash > 0:
-                    _wh_btc  += _wh_cash / p
+            _wh_last_buy_dt = None
+            for _wh_d, _wh_p, _wh_t in zip(_at_dirs, _at_prices, _at_times):
+                _wh_dt = datetime.strptime(_wh_t, "%Y-%m-%d %H:%M:%S")
+                if _wh_d == "BUY" and _wh_cash > 0:
+                    _wh_btc  += _wh_cash / _wh_p
                     _wh_cash  = 0.0
+                    _wh_last_buy_dt = _wh_dt
                     _at_whale_marker_dirs.append("BUY")
-                elif d == "SELL" and _wh_btc > 0:
-                    _wh_cash += _wh_btc * p
-                    _wh_btc   = 0.0
-                    _at_whale_marker_dirs.append("SELL")
+                elif _wh_d == "SELL" and _wh_btc > 0:
+                    _wh_elapsed = (
+                        (_wh_dt - _wh_last_buy_dt).total_seconds()
+                        if _wh_last_buy_dt else float("inf")
+                    )
+                    if _wh_elapsed >= _at_wh_min_wait * 60:
+                        _wh_cash += _wh_btc * _wh_p
+                        _wh_btc   = 0.0
+                        _at_whale_marker_dirs.append("SELL")
+                    else:
+                        _at_whale_marker_dirs.append(None)  # too soon after BUY
                 else:
-                    _at_whale_marker_dirs.append(None)  # signal skipped — cash or BTC already 0
-                _at_whale_vals.append(round(_wh_cash + _wh_btc * p, 2))
+                    _at_whale_marker_dirs.append(None)
+                _at_whale_vals.append(round(_wh_cash + _wh_btc * _wh_p, 2))
 
         # ── DCA simulation ────────────────────────────────────────────────────
         # Starts all-cash ($1000); buys a fixed amount per BUY signal; ignores SELL
@@ -3201,7 +3226,8 @@ with tab6:
             _pt_btc  = 0.0
             _pt_cash = 1000.0
             for _ptd, _ptc, _ptp in zip(_at_dirs, _at_confs, _at_prices):
-                _pt_factor = (_ptc / 100.0 - _at_threshold / 100.0) / (1.0 - _at_threshold / 100.0)
+                _pt_base = _at_buy_threshold if _ptd == "BUY" else _at_sell_threshold
+                _pt_factor = (_ptc / 100.0 - _pt_base / 100.0) / (1.0 - _pt_base / 100.0)
                 _pt_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _pt_factor)
                 if _ptd == "BUY":
                     _pt_cash_used = round(_pt_cash * _pt_pct, 2)
@@ -3222,13 +3248,18 @@ with tab6:
                 _at_partial_vals.append(round(_pt_cash + _pt_btc * _ptp, 2))
 
         # ── Chart helpers ─────────────────────────────────────────────────────
-        def _render_at_metrics(portfolio_val, cash, btc, current_price):
-            _m1, _m2, _m3, _m4 = st.columns(4)
+        def _render_at_metrics(portfolio_val, cash, btc, current_price, start_val, hold_end_val):
+            _strat_pct = (portfolio_val / start_val - 1) * 100 if start_val else 0.0
+            _hold_pct  = (hold_end_val / 1000.0 - 1) * 100 if hold_end_val else 0.0
+            _vs_hold   = _strat_pct - _hold_pct
+            _m1, _m2, _m3, _m4, _m5 = st.columns(5)
             _m1.metric("Portfolio Value", f"${portfolio_val:,.2f}",
-                       delta=f"${portfolio_val - 1000.0:+,.2f}")
+                       delta=f"{_strat_pct:+.1f}%")
             _m2.metric("Cash", f"${cash:,.2f}")
             _m3.metric("BTC Held", f"{btc:.6f} BTC" if btc else "—")
             _m4.metric("BTC Value", f"${btc * current_price:,.2f}")
+            _m5.metric("vs Hold BTC", f"{_vs_hold:+.1f}%",
+                       delta=f"Hold: {_hold_pct:+.1f}%")
 
         def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals, marker_dirs=None):
             _mds    = marker_dirs if marker_dirs is not None else dirs
@@ -3263,56 +3294,65 @@ with tab6:
             )
             return fig
 
+        _at_chart_view = st.radio(
+            "Chart view", ["Buy and Sell", "Whaling", "DCA"],
+            horizontal=True, key="at_chart_view"
+        )
+
         if _at_chart_data:
             _at_last = _at_chart_data[-1]
 
-            # ── Buy and Sell ──────────────────────────────────────────────────
-            st.markdown("#### Buy and Sell")
-            st.caption(
-                f"Partial sizing: spends/sells up to {_at_max_pct}% of holdings per signal. "
-                f"Min confidence: {_at_threshold}%."
-            )
-            _render_at_metrics(
-                _at_partial_vals[-1],
-                _pt_cash,
-                _pt_btc,
-                _at_current_price,
-            )
-            st.plotly_chart(
-                _make_at_chart("Buy and Sell", _at_partial_vals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals, _at_partial_marker_dirs),
-                use_container_width=True,
-            )
+            if _at_chart_view == "Buy and Sell":
+                # ── Buy and Sell ──────────────────────────────────────────────
+                st.markdown("#### Buy and Sell")
+                st.caption(
+                    f"Partial sizing: spends/sells up to {_at_max_pct}% of holdings per signal. "
+                    f"Min confidence: BUY {_at_buy_threshold}% / SELL {_at_sell_threshold}%."
+                )
+                _render_at_metrics(
+                    _at_partial_vals[-1], _pt_cash, _pt_btc, _at_current_price,
+                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                )
+                st.plotly_chart(
+                    _make_at_chart("Buy and Sell", _at_partial_vals, _at_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _at_partial_marker_dirs),
+                    use_container_width=True,
+                )
 
-            # ── Whaling ───────────────────────────────────────────────────────
-            st.markdown("#### Whaling")
-            st.caption(
-                f"All-in on every BUY signal (full cash → BTC); all-out on every SELL (full BTC → cash). "
-                f"Min confidence: {_at_threshold}%."
-            )
-            _render_at_metrics(
-                _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
-            )
-            st.plotly_chart(
-                _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals, _at_whale_marker_dirs),
-                use_container_width=True,
-            )
+            elif _at_chart_view == "Whaling":
+                # ── Whaling ───────────────────────────────────────────────────
+                st.markdown("#### Whaling")
+                st.caption(
+                    f"All-in on every BUY signal (full cash → BTC); all-out on every SELL (full BTC → cash). "
+                    f"Min confidence: BUY {_at_buy_threshold}% / SELL {_at_sell_threshold}%. "
+                    f"Min wait after BUY: {_at_wh_min_wait} min."
+                )
+                _render_at_metrics(
+                    _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
+                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                )
+                st.plotly_chart(
+                    _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _at_whale_marker_dirs),
+                    use_container_width=True,
+                )
 
-            # ── DCA ───────────────────────────────────────────────────────────
-            st.markdown("#### DCA")
-            st.caption(
-                f"Starts with $1,000 cash (no BTC). Buys ${_at_dca_amount:,.2f} worth of BTC on every BUY signal; ignores SELL signals. "
-                f"Min confidence: {_at_threshold}%."
-            )
-            _render_at_metrics(
-                _at_dca_vals[-1], _dc_cash, _dc_btc, _at_current_price,
-            )
-            st.plotly_chart(
-                _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
-                               _at_confs, _at_prices, _at_hold_vals, _at_dca_marker_dirs),
-                use_container_width=True,
-            )
+            elif _at_chart_view == "DCA":
+                # ── DCA ───────────────────────────────────────────────────────
+                st.markdown("#### DCA")
+                st.caption(
+                    f"Starts with $1,000 cash (no BTC). Buys ${_at_dca_amount:,.2f} worth of BTC on every BUY signal; ignores SELL signals. "
+                    f"Min confidence: BUY {_at_buy_threshold}%."
+                )
+                _render_at_metrics(
+                    _at_dca_vals[-1], _dc_cash, _dc_btc, _at_current_price,
+                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                )
+                st.plotly_chart(
+                    _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _at_dca_marker_dirs),
+                    use_container_width=True,
+                )
 
     # ── Trade history ─────────────────────────────────────────────────────────
     if st.session_state.at_trade_log:
