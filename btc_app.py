@@ -767,170 +767,178 @@ with tab1:
         st.info("Auto-prediction firing at Polymarket window boundary...")
 
     if st.button("Generate Live Prediction", type="primary") or auto_trigger:
-        with st.spinner("Fetching live data & consulting AI..."):
-            live_data = get_live_prediction_data()
-            history_df, sheet = load_history_from_sheets()
-
-            history_df = resolve_pending_trades_in_sheets(history_df, sheet, live_data=live_data)
-
-            current_state = live_data.iloc[-1:]
-            current_price = float(current_state["Close"].values[0])
-            current_time = current_state.index[0]  # UTC-naive candle timestamp
-            _live_price = get_live_ticker_price()
-            entry_price = _live_price if _live_price else current_price
-
-            # Use wall-clock time for target_time — candle timestamp lags by up to 1 candle
-            # at the boundary (last candle = 14:45 when we're actually at 14:50).
-            target_time = snap_to_polymarket_window(datetime.utcnow())
-
-            # Window start = 5 minutes before target_time
-            window_start_time = target_time - timedelta(minutes=5)
-
-            # Pyth oracle price at window open (same source Polymarket uses)
-            window_start_price = fetch_pyth_price_at(window_start_time)
-            if window_start_price is None:
-                # Fall back to Kraken candle at window open, then current price
-                window_start_candles = live_data[live_data.index == window_start_time]
-                window_start_price = (
-                    float(window_start_candles["Close"].values[0])
-                    if not window_start_candles.empty
-                    else current_price
-                )
-
-            # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
-            fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
-            pm_odds = fetch_polymarket_odds(target_time)
-
-            # Check whether data has meaningfully changed since the last prediction this window
-            _is_manual = not auto_trigger
-            _candle_changed = (current_time != st.session_state.last_pred_candle_ts)
-            _odds_changed = (
-                pm_odds is not None
-                and st.session_state.last_pred_odds_up is not None
-                and abs(pm_odds["up"] - st.session_state.last_pred_odds_up) >= 0.01
-            )
-            _data_changed = _candle_changed or _odds_changed
-
-            # For auto refresh: silently skip if data hasn't changed
-            if _refresh_trigger and not _data_changed and not _is_manual:
-                st.caption("📊 Auto-checked: data unchanged since last prediction.")
-                st.session_state.last_pred_wall_time = datetime.utcnow()
-            else:
-                if _refresh_trigger and _data_changed:
-                    _reasons = []
-                    if _candle_changed:
-                        _reasons.append("new candle")
-                    if _odds_changed:
-                        _reasons.append(
-                            f"odds Δ {abs(pm_odds['up'] - st.session_state.last_pred_odds_up)*100:.1f}%"
-                        )
-                    st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
-
-                # Seconds-precise model selection — derived from wall-clock seconds left,
-                # NOT from current_time.minute (candle timestamp can lag by 1–3 min).
-                _now = datetime.utcnow()
-                _seconds_left = max(0, int((target_time - _now).total_seconds()))
-
-                if _seconds_left < 90:          # < 1.5 min → force 1-min model
-                    _minutes_to_end = 1
-                else:
-                    _minutes_to_end = max(1, min(5, round(_seconds_left / 60)))
-
-                horizon_model = model[_minutes_to_end]
-
-                # Build the 9-feature input for the selected model
-                _price_chg = (
-                    (current_price - window_start_price) / window_start_price
-                    if window_start_price and window_start_price != 0
-                    else 0.0
-                )
-                _FEATURE_COLS = [
-                    'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
-                    'BB_Upper', 'BB_Lower', 'Volume_ROC',
-                    'price_change_since_window_start', 'price_change_abs'
-                ]
-                current_state = current_state.copy()
-                current_state["price_change_since_window_start"] = _price_chg
-                current_state["price_change_abs"] = abs(_price_chg)
-                current_state_pred = current_state[_FEATURE_COLS]
-                prediction_val = horizon_model.predict(current_state_pred)[0]
-                probabilities = horizon_model.predict_proba(current_state_pred)[0]
-
-                direction = "UP" if prediction_val == 1 else "DOWN"
-                confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
-                confidence_pct = confidence * 100
-
-                if confidence_pct < 55:
-                    signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
-                    color = "orange"
-                elif confidence_pct < 60:
-                    signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
-                    color = "blue"
-                else:
-                    signal_strength = "🔥 STRONG SIGNAL (High Probability)"
-                    color = "green"
-
-                st.markdown(f"### Target Window: {fmt_et(target_time, '%H:%M %Z')}")
-
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Current BTC Price", f"${current_price:,.2f}")
-                col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
-                col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
-
-                st.markdown(f"**Signal Strength:** :{color}[{signal_strength}] &nbsp; `{_minutes_to_end}-min model`")
-
-                # Window countdown
-                _mins, _secs = divmod(_seconds_left, 60)
-                _countdown_color = "green" if _seconds_left > 180 else "orange" if _seconds_left > 60 else "red"
-                st.markdown(f"**⏱️ Window closes in:** :{_countdown_color}[{_mins}m {_secs:02d}s]")
-
-                _window_secs_left = _seconds_left   # already computed above
-
-                if auto_trigger and pm_odds is None and _window_secs_left > 45:
-                    st.warning(
-                        "⏳ Polymarket odds not yet available — retrying on next refresh. "
-                        f"Window closes in {_window_secs_left}s."
+        _secs_since_last = (
+            (datetime.utcnow() - st.session_state.last_pred_wall_time).total_seconds()
+            if st.session_state.last_pred_wall_time else float("inf")
+        )
+        _too_soon = not auto_trigger and _secs_since_last < 10
+        if _too_soon:
+            st.warning(f"⏱ Please wait {10 - int(_secs_since_last)}s before generating another prediction.")
+        if not _too_soon:
+            with st.spinner("Fetching live data & consulting AI..."):
+                live_data = get_live_prediction_data()
+                history_df, sheet = load_history_from_sheets()
+    
+                history_df = resolve_pending_trades_in_sheets(history_df, sheet, live_data=live_data)
+    
+                current_state = live_data.iloc[-1:]
+                current_price = float(current_state["Close"].values[0])
+                current_time = current_state.index[0]  # UTC-naive candle timestamp
+                _live_price = get_live_ticker_price()
+                entry_price = _live_price if _live_price else current_price
+    
+                # Use wall-clock time for target_time — candle timestamp lags by up to 1 candle
+                # at the boundary (last candle = 14:45 when we're actually at 14:50).
+                target_time = snap_to_polymarket_window(datetime.utcnow())
+    
+                # Window start = 5 minutes before target_time
+                window_start_time = target_time - timedelta(minutes=5)
+    
+                # Pyth oracle price at window open (same source Polymarket uses)
+                window_start_price = fetch_pyth_price_at(window_start_time)
+                if window_start_price is None:
+                    # Fall back to Kraken candle at window open, then current price
+                    window_start_candles = live_data[live_data.index == window_start_time]
+                    window_start_price = (
+                        float(window_start_candles["Close"].values[0])
+                        if not window_start_candles.empty
+                        else current_price
                     )
-                    # Don't set last_auto_target → allows retry on next rerun
-                elif _window_secs_left < 60:
-                    st.error(
-                        "⛔ Window closes in under 1 minute — prediction blocked. "
-                        "Wait for the next window to open."
-                    )
-                    st.session_state.last_auto_target = target_time   # prevent auto-retry spam
-                else:
-                    if sheet:
-                        odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
-                        _pred_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        _append_meta = _load_model_metadata()
-                        _append_ver = str(_append_meta.get("model_version", "")) if _append_meta.get("model_version") else ""
-                        new_row = [
-                            _pred_timestamp,             # Col 1:  Prediction_Time (second-precision UTC)
-                            entry_price,                 # Col 2:  Entry_Price
-                            window_start_price,          # Col 3:  Window_Start_Price
-                            direction,                   # Col 4:  Prediction
-                            round(confidence_pct, 2),    # Col 5:  Confidence
-                            str(target_time),            # Col 6:  Target_Time
-                            "",                          # Col 7:  Close_Price (resolver)
-                            "Pending",                   # Col 8:  Outcome (resolver)
-                            odds_val,                    # Col 9:  Polymarket_Odds
-                            "",                          # Col 10: PM_Resolution (filled by resolver)
-                            _seconds_left,               # Col 11: Seconds_Left
-                            f"{_minutes_to_end}min",     # Col 12: Model
-                            _append_ver,                 # Col 13: Model_Version
-                        ]
-                        sheet.append_row(new_row)
-                        _fetch_sheet_records.clear()   # invalidate read cache so other tabs see new row
-                        st.session_state.pop("_sheet_obj", None)
-                        st.session_state.pop("_headers_ensured", None)
-                        st.success("✅ Prediction successfully logged to Google Sheets!")
-
-                    st.session_state.last_auto_target = target_time
-                    st.session_state.last_pred_target = target_time
-                    st.session_state.last_pred_candle_ts = current_time
+    
+                # Fetch Polymarket odds for this window (non-blocking — fails gracefully)
+                fetch_polymarket_odds.clear()          # bypass cache — always fetch fresh at prediction time
+                pm_odds = fetch_polymarket_odds(target_time)
+    
+                # Check whether data has meaningfully changed since the last prediction this window
+                _is_manual = not auto_trigger
+                _candle_changed = (current_time != st.session_state.last_pred_candle_ts)
+                _odds_changed = (
+                    pm_odds is not None
+                    and st.session_state.last_pred_odds_up is not None
+                    and abs(pm_odds["up"] - st.session_state.last_pred_odds_up) >= 0.01
+                )
+                _data_changed = _candle_changed or _odds_changed
+    
+                # For auto refresh: silently skip if data hasn't changed
+                if _refresh_trigger and not _data_changed and not _is_manual:
+                    st.caption("📊 Auto-checked: data unchanged since last prediction.")
                     st.session_state.last_pred_wall_time = datetime.utcnow()
-                    if pm_odds:
-                        st.session_state.last_pred_odds_up = pm_odds["up"]
+                else:
+                    if _refresh_trigger and _data_changed:
+                        _reasons = []
+                        if _candle_changed:
+                            _reasons.append("new candle")
+                        if _odds_changed:
+                            _reasons.append(
+                                f"odds Δ {abs(pm_odds['up'] - st.session_state.last_pred_odds_up)*100:.1f}%"
+                            )
+                        st.info(f"Auto-prediction: data refreshed ({', '.join(_reasons)})")
+    
+                    # Seconds-precise model selection — derived from wall-clock seconds left,
+                    # NOT from current_time.minute (candle timestamp can lag by 1–3 min).
+                    _now = datetime.utcnow()
+                    _seconds_left = max(0, int((target_time - _now).total_seconds()))
+    
+                    if _seconds_left < 90:          # < 1.5 min → force 1-min model
+                        _minutes_to_end = 1
+                    else:
+                        _minutes_to_end = max(1, min(5, round(_seconds_left / 60)))
+    
+                    horizon_model = model[_minutes_to_end]
+    
+                    # Build the 9-feature input for the selected model
+                    _price_chg = (
+                        (current_price - window_start_price) / window_start_price
+                        if window_start_price and window_start_price != 0
+                        else 0.0
+                    )
+                    _FEATURE_COLS = [
+                        'RSI_14', 'MACD', 'MACD_Signal', 'EMA_9', 'EMA_21',
+                        'BB_Upper', 'BB_Lower', 'Volume_ROC',
+                        'price_change_since_window_start', 'price_change_abs'
+                    ]
+                    current_state = current_state.copy()
+                    current_state["price_change_since_window_start"] = _price_chg
+                    current_state["price_change_abs"] = abs(_price_chg)
+                    current_state_pred = current_state[_FEATURE_COLS]
+                    prediction_val = horizon_model.predict(current_state_pred)[0]
+                    probabilities = horizon_model.predict_proba(current_state_pred)[0]
+    
+                    direction = "UP" if prediction_val == 1 else "DOWN"
+                    confidence = probabilities[1] if prediction_val == 1 else probabilities[0]
+                    confidence_pct = confidence * 100
+    
+                    if confidence_pct < 55:
+                        signal_strength = "⚠️ WEAK SIGNAL (Coin Flip - Do not trade)"
+                        color = "orange"
+                    elif confidence_pct < 60:
+                        signal_strength = "✅ MODERATE SIGNAL (Standard Edge)"
+                        color = "blue"
+                    else:
+                        signal_strength = "🔥 STRONG SIGNAL (High Probability)"
+                        color = "green"
+    
+                    st.markdown(f"### Target Window: {fmt_et(target_time, '%H:%M %Z')}")
+    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Current BTC Price", f"${current_price:,.2f}")
+                    col2.metric("AI Prediction", f"{direction}", delta="Long" if direction == "UP" else "-Short")
+                    col3.metric("AI Confidence", f"{confidence_pct:.1f}%")
+    
+                    st.markdown(f"**Signal Strength:** :{color}[{signal_strength}] &nbsp; `{_minutes_to_end}-min model`")
+    
+                    # Window countdown
+                    _mins, _secs = divmod(_seconds_left, 60)
+                    _countdown_color = "green" if _seconds_left > 180 else "orange" if _seconds_left > 60 else "red"
+                    st.markdown(f"**⏱️ Window closes in:** :{_countdown_color}[{_mins}m {_secs:02d}s]")
+    
+                    _window_secs_left = _seconds_left   # already computed above
+    
+                    if auto_trigger and pm_odds is None and _window_secs_left > 45:
+                        st.warning(
+                            "⏳ Polymarket odds not yet available — retrying on next refresh. "
+                            f"Window closes in {_window_secs_left}s."
+                        )
+                        # Don't set last_auto_target → allows retry on next rerun
+                    elif _window_secs_left < 60:
+                        st.error(
+                            "⛔ Window closes in under 1 minute — prediction blocked. "
+                            "Wait for the next window to open."
+                        )
+                        st.session_state.last_auto_target = target_time   # prevent auto-retry spam
+                    else:
+                        if sheet:
+                            odds_val = round(pm_odds[direction.lower()], 4) if pm_odds else ""
+                            _pred_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                            _append_meta = _load_model_metadata()
+                            _append_ver = str(_append_meta.get("model_version", "")) if _append_meta.get("model_version") else ""
+                            new_row = [
+                                _pred_timestamp,             # Col 1:  Prediction_Time (second-precision UTC)
+                                entry_price,                 # Col 2:  Entry_Price
+                                window_start_price,          # Col 3:  Window_Start_Price
+                                direction,                   # Col 4:  Prediction
+                                round(confidence_pct, 2),    # Col 5:  Confidence
+                                str(target_time),            # Col 6:  Target_Time
+                                "",                          # Col 7:  Close_Price (resolver)
+                                "Pending",                   # Col 8:  Outcome (resolver)
+                                odds_val,                    # Col 9:  Polymarket_Odds
+                                "",                          # Col 10: PM_Resolution (filled by resolver)
+                                _seconds_left,               # Col 11: Seconds_Left
+                                f"{_minutes_to_end}min",     # Col 12: Model
+                                _append_ver,                 # Col 13: Model_Version
+                            ]
+                            sheet.append_row(new_row)
+                            _fetch_sheet_records.clear()   # invalidate read cache so other tabs see new row
+                            st.session_state.pop("_sheet_obj", None)
+                            st.session_state.pop("_headers_ensured", None)
+                            st.success("✅ Prediction successfully logged to Google Sheets!")
+    
+                        st.session_state.last_auto_target = target_time
+                        st.session_state.last_pred_target = target_time
+                        st.session_state.last_pred_candle_ts = current_time
+                        st.session_state.last_pred_wall_time = datetime.utcnow()
+                        if pm_odds:
+                            st.session_state.last_pred_odds_up = pm_odds["up"]
 
     st.divider()
     # ── Live Market Context ───────────────────────────────────────────────────
@@ -1702,8 +1710,8 @@ def _quick_pl_sim(trades_df, apply_skip_rules=True, apply_bet_scaling=True):
     Returns (final_balance, n_trades_executed). Mirrors the main tab4 logic exactly.
     """
     STARTING_BALANCE = 1000.0
-    MIN_BET_PCT = 0.025
-    MAX_BET_PCT = 0.05
+    MIN_BET_PCT = 0.05
+    MAX_BET_PCT = 0.10
     HIGH_ODDS_THRESHOLD = 0.65
     MIN_CONF_FOR_HIGH_ODDS = 60.0
     CONTRARIAN_SKIP_THRESHOLD = 0.30
@@ -1789,13 +1797,13 @@ with tab3:
         "Apply skip rules (high-odds / low-confidence filter)",
         key="pl_skip_rules",
         help="When ON, bets where market odds ≥65% but AI confidence <60% are skipped. "
-             "Toggle OFF to see total P&L as if every prediction had been bet at 2.5%.",
+             "Toggle OFF to see total P&L as if every prediction had been bet at 5%.",
     )
     _apply_bet_scaling = st.toggle(
-        "Apply bet scaling (contrarian bets scale 2.5–5% by confidence)",
+        "Apply bet scaling (contrarian bets scale 5–10% by confidence)",
         key="pl_bet_scaling",
-        help="When ON, contrarian bets (market odds <50%) scale from 2.5% to 5% based on AI confidence. "
-             "Toggle OFF to apply flat 2.5% to every bet for clean P&L comparison.",
+        help="When ON, contrarian bets (market odds <50%) scale from 5% to 10% based on AI confidence. "
+             "Toggle OFF to apply flat 5% to every bet for clean P&L comparison.",
     )
     _pl_row1a, _pl_row1b, _pl_row1c = st.columns(3)
     with _pl_row1a:
@@ -2118,8 +2126,8 @@ with tab3:
         else:
             # --- Simulation constants ---
             STARTING_BALANCE = 1000.0
-            MIN_BET_PCT = 0.025          # 2.5% — floor for all bets
-            MAX_BET_PCT = 0.05           # 5.0% — hard cap
+            MIN_BET_PCT = 0.05           # 5.0% — floor for all bets
+            MAX_BET_PCT = 0.10           # 10.0% — hard cap
             HIGH_ODDS_THRESHOLD = 0.65   # market strongly agrees → payout < 1.54x
             MIN_CONF_FOR_HIGH_ODDS = 60.0  # require this confidence to bet into a high-odds market
             CONTRARIAN_SKIP_THRESHOLD = 0.30  # PM gives <30% to model's direction → skip
@@ -2184,12 +2192,12 @@ with tab3:
 
                 elif odds < 0.5 and _apply_bet_scaling:
                     # Contrarian — market disagrees, payout is large → scale up with confidence
-                    # Linear scale: 2.5% at conf=50 → 5% at conf=100
+                    # Linear scale: 5% at conf=50 → 10% at conf=100
                     bet_pct = min(MAX_BET_PCT, MIN_BET_PCT + (conf - 50) / 100 * MAX_BET_PCT)
-                    bet_pct = max(MIN_BET_PCT, bet_pct)   # floor at 2.5%
+                    bet_pct = max(MIN_BET_PCT, bet_pct)   # floor at 5%
 
                 else:
-                    # Standard zone (0.50 ≤ odds < 0.65): flat 2.5%
+                    # Standard zone (0.50 ≤ odds < 0.65): flat 5%
                     bet_pct = MIN_BET_PCT
 
                 bet_amount = balance * bet_pct
@@ -2232,11 +2240,15 @@ with tab3:
             )
             kpi3.metric("Total P&L", f"${total_pnl:+,.2f}")
             kpi4.metric("ROI", f"{roi_pct:+.2f}%")
-            st.caption(
-                f"Bet-sizing: contrarian (<50% odds) scales 2.5–5% by confidence · "
-                f"high-odds (≥{HIGH_ODDS_THRESHOLD*100:.0f}%) require ≥{MIN_CONF_FOR_HIGH_ODDS:.0f}% confidence · "
-                f"cap {MAX_BET_PCT*100:.0f}%"
+            _skip_label = (
+                f"Skip rules ON — high-odds (≥{HIGH_ODDS_THRESHOLD*100:.0f}%) skipped if confidence <{MIN_CONF_FOR_HIGH_ODDS:.0f}%"
+                if _apply_skip_rules else "Skip rules OFF"
             )
+            _scale_label = (
+                f"Bet scaling ON — contrarian (<50% odds) scales {MIN_BET_PCT*100:.0f}–{MAX_BET_PCT*100:.0f}% by confidence"
+                if _apply_bet_scaling else f"Bet scaling OFF — flat {MIN_BET_PCT*100:.0f}% on every bet"
+            )
+            st.caption(f"{_skip_label} · {_scale_label}")
             st.divider()
 
             # --- Balance-over-time chart ---
