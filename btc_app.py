@@ -2950,6 +2950,13 @@ with tab5:
 
 # ── Tab 6: Auto Trade (Beta) ─────────────────────────────────────────────────
 with tab6:
+    # Inject optimised whaling values BEFORE widgets are created (same pattern as tab3 optimizer).
+    if "_at_wh_opt_pending" in st.session_state:
+        _wh_pa = st.session_state.pop("_at_wh_opt_pending")
+        st.session_state["at_buy_threshold"]  = _wh_pa["buy"]
+        st.session_state["at_sell_threshold"] = _wh_pa["sell"]
+        st.session_state["at_wh_min_wait"]    = _wh_pa["wait"]
+
     st.warning("⚠️ Beta — paper trading only. No real funds are used.")
 
     # ── Controls ─────────────────────────────────────────────────────────────
@@ -3391,9 +3398,11 @@ with tab6:
                                             _wh_best_buy  = _ob
                                             _wh_best_sell = _os
                                             _wh_best_wait = _ow
-                        st.session_state["at_buy_threshold"]  = _wh_best_buy
-                        st.session_state["at_sell_threshold"] = _wh_best_sell
-                        st.session_state["at_wh_min_wait"]   = _wh_best_wait
+                        st.session_state["_at_wh_opt_pending"] = {
+                            "buy": _wh_best_buy,
+                            "sell": _wh_best_sell,
+                            "wait": _wh_best_wait,
+                        }
                         st.success(
                             f"Best settings found — BUY ≥{_wh_best_buy}% · "
                             f"SELL ≥{_wh_best_sell}% · min wait {_wh_best_wait} min → "
