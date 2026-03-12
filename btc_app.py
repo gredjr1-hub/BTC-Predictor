@@ -237,8 +237,239 @@ def is_at_polymarket_boundary(dt):
 
 
 # --- 1. Page Setup & Live Sync ---
-st.set_page_config(page_title="Crypto AI Predictor", layout="wide")
-st.title("🤖 Bitcoin AI Trading Terminal")
+st.set_page_config(
+    page_title="Bitcoin AI Trading Terminal",
+    page_icon="₿",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Global CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700&display=swap');
+
+/* ── Variables ── */
+:root {
+  --font:       'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --bg:         #0c0e18;
+  --bg-card:    #141826;
+  --bg-hover:   #1a1f33;
+  --border:     rgba(255,255,255,0.06);
+  --blue:       #3b82f6;
+  --blue-dim:   rgba(59,130,246,0.12);
+  --teal:       #14b8a6;
+  --green:      #22c55e;
+  --green-dim:  rgba(34,197,94,0.10);
+  --red:        #ef4444;
+  --red-dim:    rgba(239,68,68,0.10);
+  --amber:      #f59e0b;
+  --amber-dim:  rgba(245,158,11,0.10);
+  --t1: #f1f5f9;
+  --t2: #94a3b8;
+  --t3: #475569;
+  --r:  10px;
+  --r-sm: 6px;
+}
+
+/* ── Base ── */
+html, body, [class*="css"] { font-family: var(--font) !important; }
+.stApp { background-color: var(--bg) !important; }
+.main .block-container {
+  padding-top: 1.25rem !important;
+  padding-bottom: 3rem !important;
+  max-width: 1440px;
+}
+
+/* ── Headings ── */
+h1 {
+  font-size: 1.35rem !important; font-weight: 700 !important;
+  letter-spacing: -0.025em; color: var(--t1) !important;
+}
+h2, h3 { font-family: var(--font) !important; font-weight: 600 !important; color: var(--t1) !important; letter-spacing: -0.015em; }
+h3 { font-size: 1rem !important; }
+h4, h5 { font-family: var(--font) !important; font-weight: 600 !important; color: var(--t2) !important; }
+h4 { font-size: 0.875rem !important; }
+h5 { font-size: 0.8rem !important; }
+p  { color: var(--t2); font-size: 0.875rem; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+  background-color: #0f1120 !important;
+  border-right: 1px solid var(--border);
+}
+[data-testid="stSidebar"] h3 {
+  font-size: 0.62rem !important; font-weight: 600 !important;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--t3) !important;
+}
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 4px; gap: 2px;
+}
+.stTabs [data-baseweb="tab"] {
+  border-radius: var(--r-sm) !important;
+  padding: 6px 14px !important;
+  font-family: var(--font) !important;
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  color: var(--t2) !important;
+  background: transparent !important;
+  border: none !important;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s;
+}
+.stTabs [data-baseweb="tab"]:hover {
+  color: var(--t1) !important;
+  background: rgba(255,255,255,0.05) !important;
+}
+.stTabs [aria-selected="true"] {
+  background: var(--blue) !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+}
+.stTabs [data-baseweb="tab-panel"] { padding-top: 1.25rem !important; }
+
+/* ── Metrics ── */
+[data-testid="metric-container"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 0.9rem 1.1rem;
+}
+[data-testid="stMetricLabel"] p {
+  font-size: 0.68rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t2) !important;
+}
+[data-testid="stMetricValue"] {
+  font-size: 1.35rem !important;
+  font-weight: 700 !important;
+  color: var(--t1) !important;
+  letter-spacing: -0.02em;
+}
+
+/* ── Primary button ── */
+[data-testid="baseButton-primary"],
+.stButton > button[kind="primary"] {
+  background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+  border: none !important;
+  border-radius: var(--r-sm) !important;
+  color: #fff !important;
+  font-family: var(--font) !important;
+  font-size: 0.875rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em;
+  padding: 0.5rem 1.4rem !important;
+  box-shadow: 0 2px 10px rgba(59,130,246,0.35);
+  transition: box-shadow 0.15s, transform 0.1s;
+}
+[data-testid="baseButton-primary"]:hover,
+.stButton > button[kind="primary"]:hover {
+  box-shadow: 0 4px 18px rgba(59,130,246,0.55) !important;
+  transform: translateY(-1px);
+}
+
+/* ── Secondary buttons ── */
+[data-testid="baseButton-secondary"],
+.stButton > button:not([kind="primary"]) {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-sm) !important;
+  color: var(--t2) !important;
+  font-family: var(--font) !important;
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  transition: border-color 0.15s, color 0.15s;
+}
+.stButton > button:not([kind="primary"]):hover {
+  border-color: var(--blue) !important;
+  color: var(--blue) !important;
+}
+
+/* ── Link button ── */
+[data-testid="baseLinkButton-secondary"] {
+  font-size: 0.78rem !important;
+  color: var(--blue) !important;
+  border: 1px solid rgba(59,130,246,0.35) !important;
+  border-radius: var(--r-sm) !important;
+  background: var(--blue-dim) !important;
+}
+
+/* ── Alerts ── */
+.stAlert {
+  border-radius: var(--r) !important;
+  border-left-width: 3px !important;
+  font-family: var(--font) !important;
+  font-size: 0.8rem !important;
+}
+
+/* ── Expanders ── */
+[data-testid="stExpander"] {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r) !important;
+}
+[data-testid="stExpander"] details summary {
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  color: var(--t2) !important;
+}
+
+/* ── Dividers ── */
+hr {
+  border: none !important;
+  border-top: 1px solid var(--border) !important;
+  margin: 0.85rem 0 !important;
+}
+
+/* ── Captions ── */
+[data-testid="stCaptionContainer"] p,
+.stCaptionContainer p {
+  font-size: 0.72rem !important;
+  color: var(--t3) !important;
+  line-height: 1.5;
+}
+
+/* ── DataFrames ── */
+[data-testid="stDataFrame"] {
+  border-radius: var(--r) !important;
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+}
+
+/* ── Widget labels ── */
+[data-testid="stSlider"] label,
+[data-testid="stSelectbox"] label,
+[data-testid="stNumberInput"] label,
+[data-testid="stRadio"] > label,
+[data-testid="stToggle"] > label,
+[data-testid="stCheckbox"] > label {
+  font-size: 0.72rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t2) !important;
+}
+
+/* ── Spinner ── */
+[data-testid="stSpinner"] p { font-size: 0.8rem !important; color: var(--t2) !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t3); }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("₿ Bitcoin AI Trading Terminal")
 
 st.sidebar.markdown("### ⚙️ Terminal Settings")
 auto_pilot = st.sidebar.toggle("Enable Live Sync (5m interval)")
@@ -1060,10 +1291,12 @@ with tab1:
             _t1_downs = [h["down"] for h in _t1_hist]
             _t1_fig = go.Figure()
             _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_ups, mode="lines+markers",
-                                         name="UP %", line=dict(color="lime", width=2)))
+                                         name="UP %", line=dict(color="#22c55e", width=2),
+                                         marker=dict(size=5)))
             _t1_fig.add_trace(go.Scatter(x=_t1_times, y=_t1_downs, mode="lines+markers",
-                                         name="DOWN %", line=dict(color="tomato", width=2)))
-            _t1_fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
+                                         name="DOWN %", line=dict(color="#ef4444", width=2),
+                                         marker=dict(size=5)))
+            _t1_fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.15)", opacity=1)
             _t1_chart_title = ""
             if _t1_live_odds and _t1_live_odds.get("price_to_beat"):
                 _t1_chart_title = f"Strike price: ${_t1_live_odds['price_to_beat']:,.2f}"
@@ -1075,7 +1308,7 @@ with tab1:
                 margin=dict(l=0, r=0, t=40, b=0),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="white"),
+                font=dict(color="#94a3b8", family="Inter, sans-serif"),
                 legend=dict(orientation="h"),
             )
             st.plotly_chart(_t1_fig, use_container_width=True)
@@ -1156,8 +1389,8 @@ with tab1:
 
         # Colour: green if current price is above strike, red if below
         _btc_above = (_btc_strike is None) or (_btc_prices[-1] >= _btc_strike)
-        _line_col = "rgba(0,255,120,0.9)" if _btc_above else "rgba(255,80,80,0.9)"
-        _fill_col = "rgba(0,255,120,0.07)" if _btc_above else "rgba(255,80,80,0.07)"
+        _line_col = "rgba(34,197,94,0.85)"  if _btc_above else "rgba(239,68,68,0.85)"
+        _fill_col = "rgba(34,197,94,0.07)"  if _btc_above else "rgba(239,68,68,0.07)"
 
         _fig_btc = _go_btc.Figure()
         _fig_btc.add_trace(_go_btc.Scatter(
@@ -1174,12 +1407,12 @@ with tab1:
             _fig_btc.add_hline(
                 y=_btc_strike,
                 line_dash="dash",
-                line_color="gold",
+                line_color="#f59e0b",
                 line_width=1.5,
                 annotation_text=f"Strike  ${_btc_strike:,.2f}",
                 annotation_position="top right",
-                annotation_font_color="gold",
-                annotation_font_size=12,
+                annotation_font_color="#f59e0b",
+                annotation_font_size=11,
             )
 
         # ── Overlay open bet entry points ────────────────────────────────────
@@ -1205,9 +1438,9 @@ with tab1:
                         _ob_winning = None
 
                     _ob_marker_color = (
-                        "lime" if _ob_winning is True
-                        else "tomato" if _ob_winning is False
-                        else "gold"
+                        "#22c55e" if _ob_winning is True
+                        else "#ef4444" if _ob_winning is False
+                        else "#f59e0b"
                     )
                     _ob_symbol = "triangle-up" if _ob_dir == "UP" else "triangle-down"
 
@@ -1240,7 +1473,7 @@ with tab1:
             margin=dict(l=0, r=0, t=10, b=0),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="white"),
+            font=dict(color="#94a3b8", family="Inter, sans-serif"),
             showlegend=False,
             xaxis=dict(
                 range=[_win_start_dt, _t1_current_window],
@@ -1535,7 +1768,9 @@ with tab2:
                     )
                 )
 
-            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=500)
+            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=500,
+                              font=dict(family="Inter, sans-serif", color="#94a3b8"),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(20,24,38,0.5)")
             st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
@@ -2308,7 +2543,7 @@ with tab3:
             fig_bal.add_hline(
                 y=STARTING_BALANCE,
                 line_dash="dot",
-                line_color="gray",
+                line_color="rgba(255,255,255,0.15)",
                 annotation_text="Starting $1,000",
                 annotation_position="bottom right",
             )
@@ -2319,6 +2554,10 @@ with tab3:
                 template="plotly_dark",
                 height=400,
                 showlegend=False,
+                font=dict(family="Inter, sans-serif", color="#94a3b8"),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(20,24,38,0.5)",
+                margin=dict(l=0, r=0, t=40, b=0),
             )
             st.plotly_chart(fig_bal, use_container_width=True)
 
@@ -3337,12 +3576,14 @@ with tab6:
                     line=dict(color="#f0c040", width=1, dash="dot"),
                     name="Hold BTC", hoverinfo="skip",
                 ))
-            fig.add_hline(y=1000.0, line_dash="dot", line_color="gray",
+            fig.add_hline(y=1000.0, line_dash="dot", line_color="rgba(255,255,255,0.15)",
                           annotation_text="Start $1,000", annotation_position="bottom right")
             fig.update_layout(
                 title=title, xaxis_title="Trade Time (UTC)",
                 yaxis_title="Portfolio Value ($)", template="plotly_dark",
                 height=350, margin=dict(l=0, r=0, t=40, b=0), showlegend=True,
+                font=dict(family="Inter, sans-serif", color="#94a3b8"),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(20,24,38,0.5)",
             )
             return fig
 
