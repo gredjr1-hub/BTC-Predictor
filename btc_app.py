@@ -1742,6 +1742,38 @@ def _quick_pl_sim(trades_df, apply_skip_rules=True, apply_bet_scaling=True):
     return balance, n_sim
 
 
+def _quick_whale_sim(raw_data, buy_thresh, sell_thresh, min_wait_mins):
+    """Lightweight whaling simulation for the optimizer.
+    raw_data: list of trade dicts with Price, Direction, Confidence, Trade_Time.
+    Returns final portfolio value (cash + btc * last_price).
+    """
+    filtered = [
+        t for t in raw_data
+        if (t.get("Direction") == "BUY" and t.get("Confidence", 0) >= buy_thresh)
+        or (t.get("Direction") == "SELL" and t.get("Confidence", 0) >= sell_thresh)
+    ]
+    if len(filtered) < 2:
+        return 1000.0
+    prices = [t["Price"] for t in filtered]
+    dirs   = [t["Direction"] for t in filtered]
+    times  = [t["Trade_Time"] for t in filtered]
+    wh_btc = 500.0 / prices[0]
+    wh_cash = 500.0
+    wh_last_buy_dt = None
+    for d, p, t in zip(dirs, prices, times):
+        dt = datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
+        if d == "BUY" and wh_cash > 0:
+            wh_btc += wh_cash / p
+            wh_cash = 0.0
+            wh_last_buy_dt = dt
+        elif d == "SELL" and wh_btc > 0:
+            elapsed = (dt - wh_last_buy_dt).total_seconds() if wh_last_buy_dt else float("inf")
+            if elapsed >= min_wait_mins * 60:
+                wh_cash += wh_btc * p
+                wh_btc = 0.0
+    return wh_cash + wh_btc * prices[-1]
+
+
 with tab3:
     # Inject optimal filter values BEFORE widgets are created to avoid the
     # "widget key already bound" StreamlitAPIException when Apply is clicked.
@@ -3168,6 +3200,7 @@ with tab6:
 
         # ── Shared data extraction (skip rows with zero/missing price) ────────
         _at_chart_data = [t for t in _at_chart_data if t.get("Price", 0)]
+        _at_raw_for_opt = _at_chart_data  # pre-threshold snapshot for whaling optimizer
         _at_chart_data = [
             t for t in _at_chart_data
             if (t.get("Direction") == "BUY" and t.get("Confidence", 0) >= _at_buy_threshold)
@@ -3333,12 +3366,40 @@ with tab6:
 
             elif _at_chart_view == "Whaling":
                 # ── Whaling ───────────────────────────────────────────────────
-                st.markdown("#### Whaling")
+                _wh_hdr_col, _wh_opt_col = st.columns([3, 1])
+                _wh_hdr_col.markdown("#### Whaling")
                 st.caption(
                     f"All-in on every BUY signal (full cash → BTC); all-out on every SELL (full BTC → cash). "
                     f"Min confidence: BUY {_at_buy_threshold}% / SELL {_at_sell_threshold}%. "
                     f"Min wait after BUY: {_at_wh_min_wait} min."
                 )
+                if _wh_opt_col.button("⚙️ Optimize", key="at_wh_optimize", help="Sweep all threshold + wait combinations to find the settings that maximise portfolio value"):
+                    if len(_at_raw_for_opt) < 2:
+                        st.warning("Not enough trade data to optimise. Try a wider time window.")
+                    else:
+                        _wh_best_val = -1.0
+                        _wh_best_buy = _at_buy_threshold
+                        _wh_best_sell = _at_sell_threshold
+                        _wh_best_wait = _at_wh_min_wait
+                        with st.spinner("Optimising… sweeping 8,405 combinations"):
+                            for _ob in range(50, 91):
+                                for _os in range(50, 91):
+                                    for _ow in range(1, 6):
+                                        _wh_val = _quick_whale_sim(_at_raw_for_opt, _ob, _os, _ow)
+                                        if _wh_val > _wh_best_val:
+                                            _wh_best_val = _wh_val
+                                            _wh_best_buy  = _ob
+                                            _wh_best_sell = _os
+                                            _wh_best_wait = _ow
+                        st.session_state["at_buy_threshold"]  = _wh_best_buy
+                        st.session_state["at_sell_threshold"] = _wh_best_sell
+                        st.session_state["at_wh_min_wait"]   = _wh_best_wait
+                        st.success(
+                            f"Best settings found — BUY ≥{_wh_best_buy}% · "
+                            f"SELL ≥{_wh_best_sell}% · min wait {_wh_best_wait} min → "
+                            f"${_wh_best_val:,.2f} portfolio value. Sliders updated."
+                        )
+                        st.rerun()
                 _render_at_metrics(
                     _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
                     start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
