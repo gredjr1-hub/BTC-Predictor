@@ -2029,6 +2029,38 @@ def _quick_whale_sim(raw_data, buy_thresh, sell_thresh, min_wait_mins):
     return wh_cash + wh_btc * prices[-1]
 
 
+def _quick_partial_sim(raw_data, buy_thresh, sell_thresh, max_pct=10):
+    """Lightweight partial-sizing simulation for the Buy-and-Sell optimizer.
+    Returns final portfolio value. Mirrors _build_dense_sim "partial" logic.
+    """
+    filtered = [
+        t for t in raw_data
+        if (t.get("Direction") == "BUY" and t.get("Confidence", 0) >= buy_thresh)
+        or (t.get("Direction") == "SELL" and t.get("Confidence", 0) >= sell_thresh)
+    ]
+    if len(filtered) < 2:
+        return 1000.0
+    btc, cash = 0.0, 1000.0
+    for t in filtered:
+        d, c, p = t.get("Direction"), float(t.get("Confidence", 0)), float(t.get("Price", 0))
+        if not p:
+            continue
+        base = buy_thresh if d == "BUY" else sell_thresh
+        factor = (c / 100.0 - base / 100.0) / max(1.0 - base / 100.0, 1e-9)
+        pct = (max_pct / 100.0) * (0.5 + 0.5 * factor)
+        if d == "BUY":
+            used = round(cash * pct, 2)
+            if used >= 1.0:
+                btc += used / p
+                cash -= used
+        else:
+            sold = round(btc * pct, 8)
+            if sold * p >= 1.0:
+                cash += sold * p
+                btc -= sold
+    return cash + btc * float(filtered[-1].get("Price", 0))
+
+
 def _build_dense_sim(dense, trade_events, sim_type,
                      buy_thresh=60, sell_thresh=60,
                      min_wait_mins=2, max_pct=10, dca_amount=25.0):
@@ -3299,17 +3331,36 @@ with tab5:
 
 # ── Tab 6: Auto Trade (Beta) ─────────────────────────────────────────────────
 with tab6:
-    # Inject optimised whaling values BEFORE widgets are created (same pattern as tab3 optimizer).
+    # ── Apply optimizer results BEFORE widgets are created ────────────────────
     if "_at_wh_opt_pending" in st.session_state:
         _wh_pa = st.session_state.pop("_at_wh_opt_pending")
         st.session_state["at_buy_threshold"]  = _wh_pa["buy"]
         st.session_state["at_sell_threshold"] = _wh_pa["sell"]
         st.session_state["at_wh_min_wait"]    = _wh_pa["wait"]
+    if "_at_pt_opt_pending" in st.session_state:
+        _pt_pa = st.session_state.pop("_at_pt_opt_pending")
+        st.session_state["at_buy_threshold"]  = _pt_pa["buy"]
+        st.session_state["at_sell_threshold"] = _pt_pa["sell"]
+
+    # ── Auto-apply saved optimal settings when switching chart views ──────────
+    _at_curr_view = st.session_state.get("at_chart_view", "Buy and Sell")
+    _at_prev_view = st.session_state.get("_at_prev_chart_view")
+    if _at_curr_view != _at_prev_view:
+        st.session_state["_at_prev_chart_view"] = _at_curr_view
+        if _at_curr_view == "Whaling" and "_at_wh_best_settings" in st.session_state:
+            _s = st.session_state["_at_wh_best_settings"]
+            st.session_state["at_buy_threshold"]  = _s["buy"]
+            st.session_state["at_sell_threshold"] = _s["sell"]
+            st.session_state["at_wh_min_wait"]    = _s["wait"]
+        elif _at_curr_view == "Buy and Sell" and "_at_pt_best_settings" in st.session_state:
+            _s = st.session_state["_at_pt_best_settings"]
+            st.session_state["at_buy_threshold"]  = _s["buy"]
+            st.session_state["at_sell_threshold"] = _s["sell"]
 
     st.warning("⚠️ Beta — paper trading only. No real funds are used.")
 
     # ── Controls ─────────────────────────────────────────────────────────────
-    _at_col1, _at_col2, _at_col3, _at_col4 = st.columns(4)
+    _at_col1, _at_col2, _at_col3, _at_col4, _at_col5 = st.columns(5)
     with _at_col1:
         st.session_state.at_enabled = st.toggle(
             "Enable Auto Trader", value=st.session_state.at_enabled
@@ -3329,15 +3380,9 @@ with tab6:
             "Max % per Trade", min_value=5, max_value=50,
             value=10, step=5, key="at_max_pct"
         )
-    _at_col5, _at_col6 = st.columns(2)
     with _at_col5:
-        _at_dca_amount = st.number_input(
-            "DCA Buy Amount ($)", min_value=1.0, max_value=1000.0,
-            value=25.0, step=5.0, key="at_dca_amount"
-        )
-    with _at_col6:
         _at_wh_min_wait = st.slider(
-            "Whaling: Min wait after BUY (minutes)", min_value=1, max_value=5,
+            "Whaling: Min wait after BUY (min)", min_value=1, max_value=5,
             value=2, step=1, key="at_wh_min_wait"
         )
 
@@ -3623,28 +3668,6 @@ with tab6:
                         _at_whale_marker_dirs.append(None)
                     _at_whale_vals.append(round(_wh_cash + _wh_btc * _wh_p, 2))
 
-        # ── DCA simulation (dense) ────────────────────────────────────────────
-        _dc_dt_times, _dc_dt_pvals, _dc_m_times, _dc_m_pvals, _dc_m_dirs, _dc_final = \
-            _build_dense_sim(_at_dense, _at_chart_data, "dca",
-                             _at_buy_threshold, _at_sell_threshold, dca_amount=_at_dca_amount)
-        _dc_btc  = _dc_final.get("btc", 0.0)
-        _dc_cash = _dc_final.get("cash", 1000.0)
-        if _dc_dt_pvals:
-            _at_dca_vals = _dc_dt_pvals
-            _at_dca_marker_dirs = _dc_m_dirs
-        else:
-            _at_dca_vals = []
-            _at_dca_marker_dirs = []
-            if _at_prices:
-                _dc_btc = 0.0; _dc_cash = 1000.0
-                for d, p in zip(_at_dirs, _at_prices):
-                    if d == "BUY" and _dc_cash >= _at_dca_amount:
-                        _dc_btc += _at_dca_amount / p; _dc_cash -= _at_dca_amount
-                        _at_dca_marker_dirs.append("BUY")
-                    else:
-                        _at_dca_marker_dirs.append(None)
-                    _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
-
         # ── Partial-sizing simulation (dense) ─────────────────────────────────
         _pt_dt_times, _pt_dt_pvals, _pt_m_times, _pt_m_pvals, _pt_m_dirs, _pt_final = \
             _build_dense_sim(_at_dense, _at_chart_data, "partial",
@@ -3763,7 +3786,7 @@ with tab6:
             return fig
 
         _at_chart_view = st.radio(
-            "Chart view", ["Buy and Sell", "Whaling", "DCA"],
+            "Chart view", ["Buy and Sell", "Whaling"],
             horizontal=True, key="at_chart_view"
         )
 
@@ -3772,11 +3795,34 @@ with tab6:
 
             if _at_chart_view == "Buy and Sell":
                 # ── Buy and Sell ──────────────────────────────────────────────
-                st.markdown("#### Buy and Sell")
+                _pt_hdr_col, _pt_opt_col = st.columns([3, 1])
+                _pt_hdr_col.markdown("#### Buy and Sell")
                 st.caption(
                     f"Partial sizing: spends/sells up to {_at_max_pct}% of holdings per signal. "
                     f"Min confidence: BUY {_at_buy_threshold}% / SELL {_at_sell_threshold}%."
                 )
+                if _pt_opt_col.button("⚙️ Optimize", key="at_pt_optimize", help="Sweep buy/sell threshold combinations to find the settings that maximise portfolio value"):
+                    if len(_at_raw_for_opt) < 2:
+                        st.warning("Not enough trade data to optimise. Try a wider time window.")
+                    else:
+                        _pt_best_val = -1.0
+                        _pt_best_buy  = _at_buy_threshold
+                        _pt_best_sell = _at_sell_threshold
+                        with st.spinner("Optimising… sweeping 1,681 combinations"):
+                            for _ob in range(50, 91):
+                                for _os in range(50, 91):
+                                    _pt_val = _quick_partial_sim(_at_raw_for_opt, _ob, _os, _at_max_pct)
+                                    if _pt_val > _pt_best_val:
+                                        _pt_best_val = _pt_val
+                                        _pt_best_buy  = _ob
+                                        _pt_best_sell = _os
+                        st.session_state["_at_pt_best_settings"] = {"buy": _pt_best_buy, "sell": _pt_best_sell}
+                        st.session_state["_at_pt_opt_pending"] = {"buy": _pt_best_buy, "sell": _pt_best_sell}
+                        st.success(
+                            f"Best settings found — BUY ≥{_pt_best_buy}% · SELL ≥{_pt_best_sell}% → "
+                            f"${_pt_best_val:,.2f} portfolio value. Sliders updated."
+                        )
+                        st.rerun()
                 _render_at_metrics(
                     _at_partial_vals[-1], _pt_cash, _pt_btc, _at_current_price,
                     start_val=1000.0, hold_end_val=(_at_hold_dense_vals[-1] if _at_hold_dense_vals else (_at_hold_vals[-1] if _at_hold_vals else 1000.0)),
@@ -3816,11 +3862,9 @@ with tab6:
                                             _wh_best_buy  = _ob
                                             _wh_best_sell = _os
                                             _wh_best_wait = _ow
-                        st.session_state["_at_wh_opt_pending"] = {
-                            "buy": _wh_best_buy,
-                            "sell": _wh_best_sell,
-                            "wait": _wh_best_wait,
-                        }
+                        _wh_best = {"buy": _wh_best_buy, "sell": _wh_best_sell, "wait": _wh_best_wait}
+                        st.session_state["_at_wh_best_settings"] = _wh_best
+                        st.session_state["_at_wh_opt_pending"]   = _wh_best
                         st.success(
                             f"Best settings found — BUY ≥{_wh_best_buy}% · "
                             f"SELL ≥{_wh_best_sell}% · min wait {_wh_best_wait} min → "
@@ -3839,24 +3883,6 @@ with tab6:
                     use_container_width=True,
                 )
 
-            elif _at_chart_view == "DCA":
-                # ── DCA ───────────────────────────────────────────────────────
-                st.markdown("#### DCA")
-                st.caption(
-                    f"Starts with $1,000 cash (no BTC). Buys ${_at_dca_amount:,.2f} worth of BTC on every BUY signal; ignores SELL signals. "
-                    f"Min confidence: BUY {_at_buy_threshold}%."
-                )
-                _render_at_metrics(
-                    _at_dca_vals[-1], _dc_cash, _dc_btc, _at_current_price,
-                    start_val=1000.0, hold_end_val=(_at_hold_dense_vals[-1] if _at_hold_dense_vals else (_at_hold_vals[-1] if _at_hold_vals else 1000.0)),
-                )
-                st.plotly_chart(
-                    _make_at_chart("DCA", _dc_m_pvals, _dc_m_times, _at_dirs,
-                                   _at_confs, _at_prices, _at_hold_vals, _dc_m_dirs,
-                                   line_times=_dc_dt_times, line_pvals=_dc_dt_pvals,
-                                   hold_line_times=_at_hold_dense_times, hold_line_vals=_at_hold_dense_vals),
-                    use_container_width=True,
-                )
 
     # ── Trade history ─────────────────────────────────────────────────────────
     if st.session_state.at_trade_log:
