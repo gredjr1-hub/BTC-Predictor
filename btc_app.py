@@ -596,6 +596,26 @@ def get_live_ticker_price():
         return None
 
 
+@st.cache_data(ttl=60)
+def _fetch_at_price_series(since_str: str, interval_min: int) -> list:
+    """Fetch a dense BTC/USDT close-price series for the auto-trader charts.
+    Returns list of (time_str, close_price) tuples, chronological. Falls back to [].
+    """
+    try:
+        exchange = get_exchange()
+        since_ms = int(
+            datetime.strptime(since_str, "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=timezone.utc).timestamp() * 1000
+        )
+        ohlcv = exchange.fetch_ohlcv("BTC/USDT", f"{interval_min}m", since=since_ms, limit=1000)
+        return [
+            (datetime.utcfromtimestamp(c[0] / 1000).strftime("%Y-%m-%d %H:%M:%S"), float(c[4]))
+            for c in ohlcv
+        ]
+    except Exception:
+        return []
+
+
 # --- 5. Google Sheets Connection & Grader ---
 def get_gspread_client():
     creds_dict = dict(st.secrets["GCP_CREDENTIALS"])
@@ -2007,6 +2027,96 @@ def _quick_whale_sim(raw_data, buy_thresh, sell_thresh, min_wait_mins):
                 wh_cash += wh_btc * p
                 wh_btc = 0.0
     return wh_cash + wh_btc * prices[-1]
+
+
+def _build_dense_sim(dense, trade_events, sim_type,
+                     buy_thresh=60, sell_thresh=60,
+                     min_wait_mins=2, max_pct=10, dca_amount=25.0):
+    """Replay a simulation over a dense (time_str, price) series.
+
+    Returns:
+        d_times   – dense time strings (x-axis for the line)
+        d_pvals   – portfolio value at every dense tick (y-axis for the line)
+        m_times   – trade-event time strings (x-axis for markers)
+        m_pvals   – portfolio value at each trade event (y-axis for markers)
+        m_dirs    – "BUY" / "SELL" / None for each marker (for colour/symbol)
+        final_state – {"btc": float, "cash": float}
+    """
+    if not dense or not trade_events:
+        return [], [], [], [], [], {"btc": 0.0, "cash": 1000.0}
+
+    # Sort trades chronologically
+    sorted_trades = sorted(trade_events, key=lambda t: t["Trade_Time"])
+    trade_q = [
+        (datetime.strptime(t["Trade_Time"], "%Y-%m-%d %H:%M:%S"),
+         t["Direction"], float(t["Confidence"]), float(t["Price"]))
+        for t in sorted_trades
+    ]
+
+    first_price = dense[0][1]
+    if sim_type == "whaling":
+        state = {"btc": 500.0 / first_price, "cash": 500.0, "last_buy_dt": None}
+    else:
+        state = {"btc": 0.0, "cash": 1000.0, "last_buy_dt": None}
+
+    d_times, d_pvals = [], []
+    m_times, m_pvals, m_dirs = [], [], []
+    trade_idx = 0
+
+    for t_str, price in dense:
+        tick_dt = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+
+        # Apply all trade events that fall at or before this tick
+        while trade_idx < len(trade_q) and trade_q[trade_idx][0] <= tick_dt:
+            tr_dt, d, c, tr_price = trade_q[trade_idx]
+            trade_idx += 1
+            marker = None
+
+            if sim_type == "whaling":
+                if d == "BUY" and state["cash"] > 0:
+                    state["btc"] += state["cash"] / tr_price
+                    state["cash"] = 0.0
+                    state["last_buy_dt"] = tr_dt
+                    marker = "BUY"
+                elif d == "SELL" and state["btc"] > 0:
+                    elapsed = (tr_dt - state["last_buy_dt"]).total_seconds() if state["last_buy_dt"] else float("inf")
+                    if elapsed >= min_wait_mins * 60:
+                        state["cash"] += state["btc"] * tr_price
+                        state["btc"] = 0.0
+                        marker = "SELL"
+
+            elif sim_type == "partial":
+                base = buy_thresh if d == "BUY" else sell_thresh
+                factor = (c / 100.0 - base / 100.0) / max(1.0 - base / 100.0, 1e-9)
+                pct = (max_pct / 100.0) * (0.5 + 0.5 * factor)
+                if d == "BUY":
+                    used = round(state["cash"] * pct, 2)
+                    if used >= 1.0:
+                        state["btc"] += used / tr_price
+                        state["cash"] -= used
+                        marker = "BUY"
+                else:
+                    sold = round(state["btc"] * pct, 8)
+                    if sold * tr_price >= 1.0:
+                        state["cash"] += sold * tr_price
+                        state["btc"] -= sold
+                        marker = "SELL"
+
+            elif sim_type == "dca":
+                if d == "BUY" and state["cash"] >= dca_amount:
+                    state["btc"] += dca_amount / tr_price
+                    state["cash"] -= dca_amount
+                    marker = "BUY"
+
+            pval_at_trade = round(state["cash"] + state["btc"] * price, 2)
+            m_times.append(t_str)
+            m_pvals.append(pval_at_trade)
+            m_dirs.append(marker)
+
+        d_times.append(t_str)
+        d_pvals.append(round(state["cash"] + state["btc"] * price, 2))
+
+    return d_times, d_pvals, m_times, m_pvals, m_dirs, {"btc": state["btc"], "cash": state["cash"]}
 
 
 with tab3:
@@ -3458,85 +3568,110 @@ with tab6:
         _at_prices = [t["Price"]           for t in _at_chart_data]
         _at_pvals  = [t["Portfolio_Value"] for t in _at_chart_data]
 
-        # ── Hold BTC benchmark ────────────────────────────────────────────────
-        _at_hold_vals = []
+        # ── Dense 1-min price series for smooth chart lines ───────────────────
+        # Choose interval based on time span of the chart window.
+        _at_first_t = _at_chart_data[0]["Trade_Time"] if _at_chart_data else None
+        _at_dense = []
+        if _at_first_t:
+            _at_span_h = (datetime.utcnow() - datetime.strptime(_at_first_t, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+            _at_dense_interval = 1 if _at_span_h <= 3 else (5 if _at_span_h <= 24 else 15)
+            _at_dense = _fetch_at_price_series(_at_first_t, _at_dense_interval)
+
+        # ── Hold BTC benchmark (dense if available, sparse fallback) ──────────
+        _at_hold_vals = []          # sparse fallback (trade-event times)
+        _at_hold_dense_vals = []    # dense line data
+        _at_hold_dense_times = []
         if _at_prices:
             _at_hold_btc = 1000.0 / _at_prices[0]
             _at_hold_vals = [round(_at_hold_btc * p, 2) for p in _at_prices]
+        if _at_dense and _at_prices:
+            _at_hold_btc_d = 1000.0 / _at_dense[0][1]
+            _at_hold_dense_times = [t for t, _ in _at_dense]
+            _at_hold_dense_vals  = [round(_at_hold_btc_d * p, 2) for _, p in _at_dense]
 
-        # ── Whaling simulation ────────────────────────────────────────────────
-        _at_whale_vals = []
-        _at_whale_marker_dirs = []
-        if _at_prices:
-            _wh_btc  = 500.0 / _at_prices[0]
-            _wh_cash = 500.0
-            _wh_last_buy_dt = None
-            for _wh_d, _wh_p, _wh_t in zip(_at_dirs, _at_prices, _at_times):
-                _wh_dt = datetime.strptime(_wh_t, "%Y-%m-%d %H:%M:%S")
-                if _wh_d == "BUY" and _wh_cash > 0:
-                    _wh_btc  += _wh_cash / _wh_p
-                    _wh_cash  = 0.0
-                    _wh_last_buy_dt = _wh_dt
-                    _at_whale_marker_dirs.append("BUY")
-                elif _wh_d == "SELL" and _wh_btc > 0:
-                    _wh_elapsed = (
-                        (_wh_dt - _wh_last_buy_dt).total_seconds()
-                        if _wh_last_buy_dt else float("inf")
-                    )
-                    if _wh_elapsed >= _at_wh_min_wait * 60:
-                        _wh_cash += _wh_btc * _wh_p
-                        _wh_btc   = 0.0
-                        _at_whale_marker_dirs.append("SELL")
+        # ── Whaling simulation (dense) ────────────────────────────────────────
+        _wh_dt_times, _wh_dt_pvals, _wh_m_times, _wh_m_pvals, _wh_m_dirs, _wh_final = \
+            _build_dense_sim(_at_dense, _at_chart_data, "whaling",
+                             _at_buy_threshold, _at_sell_threshold, _at_wh_min_wait)
+        # Sparse fallback keeps _render_at_metrics working when dense fetch fails
+        _wh_btc  = _wh_final.get("btc", 0.0)
+        _wh_cash = _wh_final.get("cash", 500.0)
+        if _wh_dt_pvals:
+            _at_whale_vals = _wh_dt_pvals        # used for final value in metrics
+            _at_whale_marker_dirs = _wh_m_dirs   # kept for fallback chart path
+        else:
+            # Original sparse fallback
+            _at_whale_vals = []
+            _at_whale_marker_dirs = []
+            if _at_prices:
+                _wh_btc  = 500.0 / _at_prices[0]
+                _wh_cash = 500.0
+                _wh_last_buy_dt = None
+                for _wh_d, _wh_p, _wh_t in zip(_at_dirs, _at_prices, _at_times):
+                    _wh_dt = datetime.strptime(_wh_t, "%Y-%m-%d %H:%M:%S")
+                    if _wh_d == "BUY" and _wh_cash > 0:
+                        _wh_btc += _wh_cash / _wh_p; _wh_cash = 0.0; _wh_last_buy_dt = _wh_dt
+                        _at_whale_marker_dirs.append("BUY")
+                    elif _wh_d == "SELL" and _wh_btc > 0:
+                        _elapsed = (_wh_dt - _wh_last_buy_dt).total_seconds() if _wh_last_buy_dt else float("inf")
+                        if _elapsed >= _at_wh_min_wait * 60:
+                            _wh_cash += _wh_btc * _wh_p; _wh_btc = 0.0
+                            _at_whale_marker_dirs.append("SELL")
+                        else:
+                            _at_whale_marker_dirs.append(None)
                     else:
-                        _at_whale_marker_dirs.append(None)  # too soon after BUY
-                else:
-                    _at_whale_marker_dirs.append(None)
-                _at_whale_vals.append(round(_wh_cash + _wh_btc * _wh_p, 2))
+                        _at_whale_marker_dirs.append(None)
+                    _at_whale_vals.append(round(_wh_cash + _wh_btc * _wh_p, 2))
 
-        # ── DCA simulation ────────────────────────────────────────────────────
-        # Starts all-cash ($1000); buys a fixed amount per BUY signal; ignores SELL
-        _at_dca_vals = []
-        _at_dca_marker_dirs = []  # None for SELL (ignored), "BUY" for buy signals
-        if _at_prices:
-            _dc_btc  = 0.0
-            _dc_cash = 1000.0
-            for d, p in zip(_at_dirs, _at_prices):
-                if d == "BUY" and _dc_cash >= _at_dca_amount:
-                    _dc_btc  += _at_dca_amount / p
-                    _dc_cash -= _at_dca_amount
-                    _at_dca_marker_dirs.append("BUY")
-                else:
-                    _at_dca_marker_dirs.append(None)  # SELL or insufficient cash → no marker
-                _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
+        # ── DCA simulation (dense) ────────────────────────────────────────────
+        _dc_dt_times, _dc_dt_pvals, _dc_m_times, _dc_m_pvals, _dc_m_dirs, _dc_final = \
+            _build_dense_sim(_at_dense, _at_chart_data, "dca",
+                             _at_buy_threshold, _at_sell_threshold, dca_amount=_at_dca_amount)
+        _dc_btc  = _dc_final.get("btc", 0.0)
+        _dc_cash = _dc_final.get("cash", 1000.0)
+        if _dc_dt_pvals:
+            _at_dca_vals = _dc_dt_pvals
+            _at_dca_marker_dirs = _dc_m_dirs
+        else:
+            _at_dca_vals = []
+            _at_dca_marker_dirs = []
+            if _at_prices:
+                _dc_btc = 0.0; _dc_cash = 1000.0
+                for d, p in zip(_at_dirs, _at_prices):
+                    if d == "BUY" and _dc_cash >= _at_dca_amount:
+                        _dc_btc += _at_dca_amount / p; _dc_cash -= _at_dca_amount
+                        _at_dca_marker_dirs.append("BUY")
+                    else:
+                        _at_dca_marker_dirs.append(None)
+                    _at_dca_vals.append(round(_dc_cash + _dc_btc * p, 2))
 
-        # ── Partial-sizing simulation (Buy/Sell chart) ────────────────────────
-        # Re-runs actual strategy with current _at_max_pct; starts $1,000 cash
-        _at_partial_vals = []
-        _at_partial_marker_dirs = []
-        if _at_prices:
-            _pt_btc  = 0.0
-            _pt_cash = 1000.0
-            for _ptd, _ptc, _ptp in zip(_at_dirs, _at_confs, _at_prices):
-                _pt_base = _at_buy_threshold if _ptd == "BUY" else _at_sell_threshold
-                _pt_factor = (_ptc / 100.0 - _pt_base / 100.0) / (1.0 - _pt_base / 100.0)
-                _pt_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _pt_factor)
-                if _ptd == "BUY":
-                    _pt_cash_used = round(_pt_cash * _pt_pct, 2)
-                    if _pt_cash_used >= 1.0:
-                        _pt_btc  += _pt_cash_used / _ptp
-                        _pt_cash -= _pt_cash_used
-                        _at_partial_marker_dirs.append("BUY")
+        # ── Partial-sizing simulation (dense) ─────────────────────────────────
+        _pt_dt_times, _pt_dt_pvals, _pt_m_times, _pt_m_pvals, _pt_m_dirs, _pt_final = \
+            _build_dense_sim(_at_dense, _at_chart_data, "partial",
+                             _at_buy_threshold, _at_sell_threshold, max_pct=_at_max_pct)
+        _pt_btc  = _pt_final.get("btc", 0.0)
+        _pt_cash = _pt_final.get("cash", 1000.0)
+        if _pt_dt_pvals:
+            _at_partial_vals = _pt_dt_pvals
+            _at_partial_marker_dirs = _pt_m_dirs
+        else:
+            _at_partial_vals = []
+            _at_partial_marker_dirs = []
+            if _at_prices:
+                _pt_btc = 0.0; _pt_cash = 1000.0
+                for _ptd, _ptc, _ptp in zip(_at_dirs, _at_confs, _at_prices):
+                    _pt_base = _at_buy_threshold if _ptd == "BUY" else _at_sell_threshold
+                    _pt_factor = (_ptc / 100.0 - _pt_base / 100.0) / (1.0 - _pt_base / 100.0)
+                    _pt_pct = (_at_max_pct / 100.0) * (0.5 + 0.5 * _pt_factor)
+                    if _ptd == "BUY":
+                        used = round(_pt_cash * _pt_pct, 2)
+                        if used >= 1.0: _pt_btc += used / _ptp; _pt_cash -= used; _at_partial_marker_dirs.append("BUY")
+                        else: _at_partial_marker_dirs.append(None)
                     else:
-                        _at_partial_marker_dirs.append(None)
-                else:  # SELL
-                    _pt_btc_sold = round(_pt_btc * _pt_pct, 8)
-                    if _pt_btc_sold * _ptp >= 1.0:
-                        _pt_cash += _pt_btc_sold * _ptp
-                        _pt_btc  -= _pt_btc_sold
-                        _at_partial_marker_dirs.append("SELL")
-                    else:
-                        _at_partial_marker_dirs.append(None)
-                _at_partial_vals.append(round(_pt_cash + _pt_btc * _ptp, 2))
+                        sold = round(_pt_btc * _pt_pct, 8)
+                        if sold * _ptp >= 1.0: _pt_cash += sold * _ptp; _pt_btc -= sold; _at_partial_marker_dirs.append("SELL")
+                        else: _at_partial_marker_dirs.append(None)
+                    _at_partial_vals.append(round(_pt_cash + _pt_btc * _ptp, 2))
 
         # ── Chart helpers ─────────────────────────────────────────────────────
         def _render_at_metrics(portfolio_val, cash, btc, current_price, start_val, hold_end_val):
@@ -3552,38 +3687,78 @@ with tab6:
             _m5.metric("vs Hold BTC", f"{_vs_hold:+.1f}%",
                        delta=f"Hold: {_hold_pct:+.1f}%")
 
-        def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals, marker_dirs=None):
+        def _make_at_chart(title, pvals, times, dirs, confs, prices, hold_vals, marker_dirs=None,
+                           line_times=None, line_pvals=None,
+                           hold_line_times=None, hold_line_vals=None):
+            """Render a portfolio-value chart.
+            If line_times/line_pvals are supplied (dense), the portfolio line uses them and
+            trade events are shown as markers only.  Falls back to combined lines+markers otherwise.
+            hold_line_times/hold_line_vals supply a dense Hold BTC line; hold_vals is the fallback.
+            """
             _mds    = marker_dirs if marker_dirs is not None else dirs
-            colors  = ["#00c896" if d == "BUY" else ("#ff4b4b" if d == "SELL" else "rgba(120,120,120,0.4)") for d in _mds]
+            # Marker data: align with m_times if dense data was provided, else with times
+            _m_times  = line_times[:len(_mds)] if (line_times and len(line_times) >= len(_mds) and not times) else times
+            # When using dense mode, marker x-axis comes from the caller's m_times list
+            colors  = ["#22c55e" if d == "BUY" else ("#ef4444" if d == "SELL" else "rgba(120,120,120,0)") for d in _mds]
             symbols = ["triangle-up" if d == "BUY" else ("triangle-down" if d == "SELL" else "circle") for d in _mds]
-            sizes   = [12 if d else 5 for d in _mds]
+            sizes   = [13 if d else 0 for d in _mds]
             hover = [
                 f"{times[i]}<br>{dirs[i]} | Conf: {confs[i]:.1f}%<br>"
                 f"Price: ${prices[i]:,.2f}<br>Portfolio: ${pvals[i]:,.2f}"
                 for i in range(len(pvals))
             ]
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=times, y=pvals, mode="lines+markers",
-                line=dict(color="#7c8cf8", width=2),
-                marker=dict(color=colors, symbol=symbols, size=sizes,
-                            line=dict(width=1, color="white")),
-                hovertext=hover, hoverinfo="text", name="Portfolio Value",
-            ))
-            if hold_vals:
+
+            if line_times and line_pvals:
+                # Dense line trace (no markers)
+                fig.add_trace(go.Scatter(
+                    x=line_times, y=line_pvals, mode="lines",
+                    line=dict(color="#7c8cf8", width=2),
+                    name="Portfolio Value", hoverinfo="skip",
+                ))
+                # Marker-only trace at actual trade events
+                if times:
+                    fig.add_trace(go.Scatter(
+                        x=times, y=pvals, mode="markers",
+                        marker=dict(color=colors, symbol=symbols, size=sizes,
+                                    line=dict(width=1.5, color="rgba(255,255,255,0.6)")),
+                        hovertext=hover, hoverinfo="text", name="Trades", showlegend=False,
+                    ))
+            else:
+                # Fallback: combined lines+markers on sparse trade-event data
+                fig.add_trace(go.Scatter(
+                    x=times, y=pvals, mode="lines+markers",
+                    line=dict(color="#7c8cf8", width=2),
+                    marker=dict(color=colors, symbol=symbols, size=sizes,
+                                line=dict(width=1, color="white")),
+                    hovertext=hover, hoverinfo="text", name="Portfolio Value",
+                ))
+
+            # Hold BTC line — use dense if available
+            if hold_line_times and hold_line_vals:
+                fig.add_trace(go.Scatter(
+                    x=hold_line_times, y=hold_line_vals, mode="lines",
+                    line=dict(color="#f0c040", width=1, dash="dot"),
+                    name="Hold BTC", hoverinfo="skip",
+                ))
+            elif hold_vals:
                 fig.add_trace(go.Scatter(
                     x=times, y=hold_vals, mode="lines",
                     line=dict(color="#f0c040", width=1, dash="dot"),
                     name="Hold BTC", hoverinfo="skip",
                 ))
+
             fig.add_hline(y=1000.0, line_dash="dot", line_color="rgba(255,255,255,0.15)",
                           annotation_text="Start $1,000", annotation_position="bottom right")
             fig.update_layout(
-                title=title, xaxis_title="Trade Time (UTC)",
+                title=title, xaxis_title="Time (UTC)",
                 yaxis_title="Portfolio Value ($)", template="plotly_dark",
-                height=350, margin=dict(l=0, r=0, t=40, b=0), showlegend=True,
+                height=380, margin=dict(l=0, r=0, t=40, b=0), showlegend=True,
                 font=dict(family="Inter, sans-serif", color="#94a3b8"),
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(20,24,38,0.5)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                xaxis=dict(gridcolor="rgba(255,255,255,0.04)"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.04)"),
             )
             return fig
 
@@ -3604,11 +3779,13 @@ with tab6:
                 )
                 _render_at_metrics(
                     _at_partial_vals[-1], _pt_cash, _pt_btc, _at_current_price,
-                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                    start_val=1000.0, hold_end_val=(_at_hold_dense_vals[-1] if _at_hold_dense_vals else (_at_hold_vals[-1] if _at_hold_vals else 1000.0)),
                 )
                 st.plotly_chart(
-                    _make_at_chart("Buy and Sell", _at_partial_vals, _at_times, _at_dirs,
-                                   _at_confs, _at_prices, _at_hold_vals, _at_partial_marker_dirs),
+                    _make_at_chart("Buy and Sell", _pt_m_pvals, _pt_m_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _pt_m_dirs,
+                                   line_times=_pt_dt_times, line_pvals=_pt_dt_pvals,
+                                   hold_line_times=_at_hold_dense_times, hold_line_vals=_at_hold_dense_vals),
                     use_container_width=True,
                 )
 
@@ -3652,11 +3829,13 @@ with tab6:
                         st.rerun()
                 _render_at_metrics(
                     _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
-                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                    start_val=1000.0, hold_end_val=(_at_hold_dense_vals[-1] if _at_hold_dense_vals else (_at_hold_vals[-1] if _at_hold_vals else 1000.0)),
                 )
                 st.plotly_chart(
-                    _make_at_chart("Whaling", _at_whale_vals, _at_times, _at_dirs,
-                                   _at_confs, _at_prices, _at_hold_vals, _at_whale_marker_dirs),
+                    _make_at_chart("Whaling", _wh_m_pvals, _wh_m_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _wh_m_dirs,
+                                   line_times=_wh_dt_times, line_pvals=_wh_dt_pvals,
+                                   hold_line_times=_at_hold_dense_times, hold_line_vals=_at_hold_dense_vals),
                     use_container_width=True,
                 )
 
@@ -3669,11 +3848,13 @@ with tab6:
                 )
                 _render_at_metrics(
                     _at_dca_vals[-1], _dc_cash, _dc_btc, _at_current_price,
-                    start_val=1000.0, hold_end_val=_at_hold_vals[-1] if _at_hold_vals else 1000.0,
+                    start_val=1000.0, hold_end_val=(_at_hold_dense_vals[-1] if _at_hold_dense_vals else (_at_hold_vals[-1] if _at_hold_vals else 1000.0)),
                 )
                 st.plotly_chart(
-                    _make_at_chart("DCA", _at_dca_vals, _at_times, _at_dirs,
-                                   _at_confs, _at_prices, _at_hold_vals, _at_dca_marker_dirs),
+                    _make_at_chart("DCA", _dc_m_pvals, _dc_m_times, _at_dirs,
+                                   _at_confs, _at_prices, _at_hold_vals, _dc_m_dirs,
+                                   line_times=_dc_dt_times, line_pvals=_dc_dt_pvals,
+                                   hold_line_times=_at_hold_dense_times, hold_line_vals=_at_hold_dense_vals),
                     use_container_width=True,
                 )
 
