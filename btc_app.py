@@ -3357,6 +3357,46 @@ with tab6:
             st.session_state["at_buy_threshold"]  = _s["buy"]
             st.session_state["at_sell_threshold"] = _s["sell"]
 
+    # ── Run optimization (before any slow API calls) ───────────────────────────
+    if st.session_state.pop("_at_pt_opt_requested", False):
+        _opt_raw = st.session_state.pop("_at_opt_raw_snapshot", [])
+        _opt_max = st.session_state.pop("_at_opt_max_pct_snap", 10)
+        if len(_opt_raw) >= 2:
+            _pt_best_val = -1.0; _pt_best_buy = 60; _pt_best_sell = 60
+            for _ob in range(50, 91):
+                for _os in range(50, 91):
+                    _v = _quick_partial_sim(_opt_raw, _ob, _os, _opt_max)
+                    if _v > _pt_best_val:
+                        _pt_best_val = _v; _pt_best_buy = _ob; _pt_best_sell = _os
+            st.session_state["_at_pt_best_settings"] = {"buy": _pt_best_buy, "sell": _pt_best_sell}
+            st.session_state["_at_pt_opt_pending"]   = {"buy": _pt_best_buy, "sell": _pt_best_sell}
+            st.session_state["_at_opt_result"] = (
+                f"✅ Buy and Sell optimal: BUY ≥{_pt_best_buy}% · SELL ≥{_pt_best_sell}% → ${_pt_best_val:,.2f}"
+            )
+            st.rerun()
+
+    if st.session_state.pop("_at_wh_opt_requested", False):
+        _opt_raw = st.session_state.pop("_at_opt_raw_snapshot", [])
+        if len(_opt_raw) >= 2:
+            _wh_best_val = -1.0; _wh_best_buy = 60; _wh_best_sell = 60; _wh_best_wait = 2
+            for _ob in range(50, 91):
+                for _os in range(50, 91):
+                    for _ow in range(1, 6):
+                        _v = _quick_whale_sim(_opt_raw, _ob, _os, _ow)
+                        if _v > _wh_best_val:
+                            _wh_best_val = _v; _wh_best_buy = _ob; _wh_best_sell = _os; _wh_best_wait = _ow
+            _wh_best = {"buy": _wh_best_buy, "sell": _wh_best_sell, "wait": _wh_best_wait}
+            st.session_state["_at_wh_best_settings"] = _wh_best
+            st.session_state["_at_wh_opt_pending"]   = _wh_best
+            st.session_state["_at_opt_result"] = (
+                f"✅ Whaling optimal: BUY ≥{_wh_best_buy}% · SELL ≥{_wh_best_sell}% · wait {_wh_best_wait} min → ${_wh_best_val:,.2f}"
+            )
+            st.rerun()
+
+    # Show optimizer result message (set by computation block on previous rerun)
+    if "_at_opt_result" in st.session_state:
+        st.success(st.session_state.pop("_at_opt_result"))
+
     st.warning("⚠️ Beta — paper trading only. No real funds are used.")
 
     # ── Controls ─────────────────────────────────────────────────────────────
@@ -3805,23 +3845,9 @@ with tab6:
                     if len(_at_raw_for_opt) < 2:
                         st.warning("Not enough trade data to optimise. Try a wider time window.")
                     else:
-                        _pt_best_val = -1.0
-                        _pt_best_buy  = _at_buy_threshold
-                        _pt_best_sell = _at_sell_threshold
-                        with st.spinner("Optimising… sweeping 1,681 combinations"):
-                            for _ob in range(50, 91):
-                                for _os in range(50, 91):
-                                    _pt_val = _quick_partial_sim(_at_raw_for_opt, _ob, _os, _at_max_pct)
-                                    if _pt_val > _pt_best_val:
-                                        _pt_best_val = _pt_val
-                                        _pt_best_buy  = _ob
-                                        _pt_best_sell = _os
-                        st.session_state["_at_pt_best_settings"] = {"buy": _pt_best_buy, "sell": _pt_best_sell}
-                        st.session_state["_at_pt_opt_pending"] = {"buy": _pt_best_buy, "sell": _pt_best_sell}
-                        st.success(
-                            f"Best settings found — BUY ≥{_pt_best_buy}% · SELL ≥{_pt_best_sell}% → "
-                            f"${_pt_best_val:,.2f} portfolio value. Sliders updated."
-                        )
+                        st.session_state["_at_pt_opt_requested"] = True
+                        st.session_state["_at_opt_raw_snapshot"] = list(_at_raw_for_opt)
+                        st.session_state["_at_opt_max_pct_snap"] = _at_max_pct
                         st.rerun()
                 _render_at_metrics(
                     _at_partial_vals[-1], _pt_cash, _pt_btc, _at_current_price,
@@ -3848,28 +3874,8 @@ with tab6:
                     if len(_at_raw_for_opt) < 2:
                         st.warning("Not enough trade data to optimise. Try a wider time window.")
                     else:
-                        _wh_best_val = -1.0
-                        _wh_best_buy = _at_buy_threshold
-                        _wh_best_sell = _at_sell_threshold
-                        _wh_best_wait = _at_wh_min_wait
-                        with st.spinner("Optimising… sweeping 8,405 combinations"):
-                            for _ob in range(50, 91):
-                                for _os in range(50, 91):
-                                    for _ow in range(1, 6):
-                                        _wh_val = _quick_whale_sim(_at_raw_for_opt, _ob, _os, _ow)
-                                        if _wh_val > _wh_best_val:
-                                            _wh_best_val = _wh_val
-                                            _wh_best_buy  = _ob
-                                            _wh_best_sell = _os
-                                            _wh_best_wait = _ow
-                        _wh_best = {"buy": _wh_best_buy, "sell": _wh_best_sell, "wait": _wh_best_wait}
-                        st.session_state["_at_wh_best_settings"] = _wh_best
-                        st.session_state["_at_wh_opt_pending"]   = _wh_best
-                        st.success(
-                            f"Best settings found — BUY ≥{_wh_best_buy}% · "
-                            f"SELL ≥{_wh_best_sell}% · min wait {_wh_best_wait} min → "
-                            f"${_wh_best_val:,.2f} portfolio value. Sliders updated."
-                        )
+                        st.session_state["_at_wh_opt_requested"] = True
+                        st.session_state["_at_opt_raw_snapshot"] = list(_at_raw_for_opt)
                         st.rerun()
                 _render_at_metrics(
                     _at_whale_vals[-1], _wh_cash, _wh_btc, _at_current_price,
